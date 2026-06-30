@@ -87,10 +87,10 @@ public class TradeManager {
         return activeWallId;
     }
 
-    /** Act on an entry signal produced by the wave tracker. */
-    public void onEntrySignal(WaveTracker.EntrySignal sig, LiquidityWall wall) {
+    /** Act on an entry signal produced by the wave tracker. Returns true if a trade was opened/requested. */
+    public boolean onEntrySignal(WaveTracker.EntrySignal sig, LiquidityWall wall) {
         if (!canEnter()) {
-            return;
+            return false;
         }
         this.shadow = !settings.enableTrading;
         this.currentTradeId = ++tradeSeq;
@@ -114,6 +114,7 @@ public class TradeManager {
             state = State.ENTERING;
             api.sendOrder(new SimpleOrderSendParametersBuilder(alias, side.isBuy, settings.orderSize).build());
         }
+        return true;
     }
 
     private void openPosition(double fillPrice) {

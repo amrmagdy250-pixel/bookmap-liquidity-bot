@@ -37,7 +37,21 @@ public class Settings {
     // ---- Wall detection ------------------------------------------------------
 
     /** Minimum clustered resting size for a level area to count as a wall. */
-    public int wallMinSize = 40;
+    public int wallMinSize = 47;
+
+    /**
+     * Hysteresis for breaking a confirmed wall: once trusted, a wall is only
+     * considered "thinned/broken" when its size falls below
+     * {@code wallMinSize * wallBreakSizeFraction}. This stops a big wall from
+     * flickering broken/confirmed (and being re-traded) on small size wobbles.
+     */
+    public double wallBreakSizeFraction = 0.5;
+
+    /** A wall is kept this long after it was last seen, to ride out depth flicker. */
+    public long wallRemoveGraceMs = 1500;
+
+    /** Maximum number of trades taken on a single wall while it stays confirmed. */
+    public int maxTradesPerWall = 2;
 
     /**
      * A wall must also be <b>dominant</b>: at least this many times the average

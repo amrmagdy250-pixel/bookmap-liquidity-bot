@@ -39,9 +39,6 @@ public class WallDetector {
     private final List<LiquidityWall> tracked = new ArrayList<>();
     private long idCounter = 1;
 
-    /** A wall kept this long after it was last seen, to ride out depth flicker. */
-    private static final long REMOVE_GRACE_MS = 750;
-
     public WallDetector(Settings settings, double pips, Listener listener) {
         this.settings = settings;
         this.pips = pips;
@@ -75,8 +72,13 @@ public class WallDetector {
                     (w.side == LiquidityWall.Side.ASK && bestBid != null && w.level < bestBid)
                             || (w.side == LiquidityWall.Side.BID && bestAsk != null && w.level > bestAsk);
 
-            boolean thinned = (now - w.lastSeenMs) <= REMOVE_GRACE_MS && w.size < settings.wallMinSize;
-            boolean vanished = (now - w.lastSeenMs) > REMOVE_GRACE_MS;
+            // A trusted wall only breaks once it thins well below the entry
+            // threshold (hysteresis); an unconfirmed one breaks at the threshold.
+            double thinFloor = w.confirmed
+                    ? settings.wallMinSize * settings.wallBreakSizeFraction
+                    : settings.wallMinSize;
+            boolean thinned = (now - w.lastSeenMs) <= settings.wallRemoveGraceMs && w.size < thinFloor;
+            boolean vanished = (now - w.lastSeenMs) > settings.wallRemoveGraceMs;
 
             if (tradedThrough || thinned || vanished) {
                 if (w.confirmed) {

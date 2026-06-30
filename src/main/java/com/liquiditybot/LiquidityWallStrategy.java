@@ -92,6 +92,9 @@ public class LiquidityWallStrategy implements
     private long lastDetectMs = 0;
     private long activeTargetId = -1;
 
+    /** Trades already taken per wall id, to cap entries on a single wall. */
+    private final java.util.Map<Long, Integer> tradesPerWall = new java.util.HashMap<>();
+
     @Override
     public void initialize(String alias, InstrumentInfo info, Api api, InitialState initialState) {
         this.api = api;
@@ -210,8 +213,10 @@ public class LiquidityWallStrategy implements
             WaveTracker.EntrySignal sig = waveTracker.onPrice(price);
             if (sig != null) {
                 LiquidityWall wall = findWall(activeTargetId);
-                if (wall != null) {
-                    tradeManager.onEntrySignal(sig, wall);
+                if (wall != null
+                        && tradesPerWall.getOrDefault(wall.id, 0) < settings.maxTradesPerWall
+                        && tradeManager.onEntrySignal(sig, wall)) {
+                    tradesPerWall.merge(wall.id, 1, Integer::sum);
                 }
             }
         }
@@ -234,9 +239,15 @@ public class LiquidityWallStrategy implements
             tradeManager.clearActiveWallIfFlat();
         }
 
+        // Forget trade counts for walls that no longer exist, so memory stays bounded.
+        tradesPerWall.keySet().removeIf(id -> findWall(id) == null);
+
         LiquidityWall nearest = null;
         double bestDist = Double.MAX_VALUE;
         for (LiquidityWall w : detector.allConfirmed()) {
+            if (tradesPerWall.getOrDefault(w.id, 0) >= settings.maxTradesPerWall) {
+                continue; // already traded this wall the maximum number of times
+            }
             double d = Math.abs(w.price - price);
             if (d <= settings.maxWallDistanceDollars && d < bestDist) {
                 bestDist = d;
@@ -351,6 +362,8 @@ public class LiquidityWallStrategy implements
                         v -> settings.wallMinSize = (int) v),
                 spinner("Wall dominance (x avg)", settings.wallDominanceRatio, 1, 100, 0.5,
                         v -> settings.wallDominanceRatio = v),
+                spinner("Max trades per wall", settings.maxTradesPerWall, 1, 100, 1,
+                        v -> settings.maxTradesPerWall = (int) v),
                 spinner("Wall cluster (ticks)", settings.wallClusterTicks, 0, 50, 1,
                         v -> settings.wallClusterTicks = (int) v),
                 spinner("Wall persistence (ms)", settings.wallPersistenceMs, 0, 60000, 100,
