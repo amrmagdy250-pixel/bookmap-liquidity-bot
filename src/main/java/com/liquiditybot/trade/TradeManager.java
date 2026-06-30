@@ -32,6 +32,7 @@ public class TradeManager {
     private final BlackBox blackBox;
     private final StatsIndicators stats;
     private final double multiplier;
+    private final double pips;
 
     private State state = State.FLAT;
     private boolean shadow;
@@ -60,13 +61,14 @@ public class TradeManager {
     private long lastPostSampleMs = 0;
 
     public TradeManager(Api api, String alias, Settings settings, BlackBox blackBox,
-                        StatsIndicators stats, double multiplier) {
+                        StatsIndicators stats, double multiplier, double pips) {
         this.api = api;
         this.alias = alias;
         this.settings = settings;
         this.blackBox = blackBox;
         this.stats = stats;
         this.multiplier = multiplier;
+        this.pips = pips;
     }
 
     public void setNow(long nowMs) {
@@ -218,9 +220,10 @@ public class TradeManager {
     }
 
     public void onOrderExecuted(ExecutionInfo ei) {
-        this.lastExecPrice = ei.price;
+        // Bookmap fill prices are tick indices; convert to real price units.
+        this.lastExecPrice = ei.price * pips;
         if (state == State.EXITING) {
-            this.exitFillPrice = ei.price;
+            this.exitFillPrice = ei.price * pips;
         }
     }
 
@@ -228,7 +231,7 @@ public class TradeManager {
         int pos = si.position;
         if (state == State.ENTERING && pos != 0) {
             double fill = !Double.isNaN(si.averagePrice) && si.averagePrice > 0
-                    ? si.averagePrice : lastExecPrice;
+                    ? si.averagePrice * pips : lastExecPrice;
             openPosition(fill);
         } else if (state == State.EXITING && pos == 0) {
             double exit = !Double.isNaN(exitFillPrice) ? exitFillPrice

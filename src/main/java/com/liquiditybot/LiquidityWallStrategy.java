@@ -102,7 +102,7 @@ public class LiquidityWallStrategy implements
         this.blackBox = new BlackBox(alias);
         this.book = new OrderBook(pips);
         this.stats = new StatsIndicators(api);
-        this.tradeManager = new TradeManager(api, alias, settings, blackBox, stats, info.multiplier);
+        this.tradeManager = new TradeManager(api, alias, settings, blackBox, stats, info.multiplier, pips);
         this.waveTracker = new WaveTracker(settings);
         this.detector = new WallDetector(settings, pips, new WallDetector.Listener() {
             @Override
@@ -169,7 +169,9 @@ public class LiquidityWallStrategy implements
     @Override
     public void onTrade(double price, int size, TradeInfo tradeInfo) {
         stats.onTrade(size, tradeInfo.isBidAggressor);
-        onPriceUpdate(price);
+        // Bookmap reports prices as tick indices; convert to real price units so
+        // trade prices match the wall/BBO prices used everywhere else.
+        onPriceUpdate(price * pips);
     }
 
     private void maybeDetect() {
@@ -198,8 +200,10 @@ public class LiquidityWallStrategy implements
         ensureTarget(price);
 
         if (activeTargetId != -1) {
-            activeWallIndicator.addPoint(findWall(activeTargetId) != null
-                    ? findWall(activeTargetId).price : price);
+            LiquidityWall target = findWall(activeTargetId);
+            // The chart axis is in tick indices, so plot the wall level (not the
+            // real-dollar price we use internally for the strategy maths).
+            activeWallIndicator.addPoint(target != null ? target.level : price / pips);
         }
 
         if (waveTracker.isArmed() && tradeManager.canEnter()) {
@@ -276,7 +280,7 @@ public class LiquidityWallStrategy implements
     public void onOrderExecuted(ExecutionInfo executionInfo) {
         tradeManager.onOrderExecuted(executionInfo);
         blackBox.log(nowMs, "ORDER_EXECUTED", "orderId", executionInfo.orderId,
-                "size", executionInfo.size, "price", executionInfo.price,
+                "size", executionInfo.size, "price", executionInfo.price * pips,
                 "simulated", executionInfo.isSimulated);
     }
 
