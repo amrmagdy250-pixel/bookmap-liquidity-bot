@@ -54,8 +54,8 @@ public class WallDetector {
         Integer bestAsk = book.bestAskLevel();
 
         List<Candidate> candidates = new ArrayList<>();
-        candidates.addAll(cluster(book.bidsSnapshot(), LiquidityWall.Side.BID, midPrice, false));
-        candidates.addAll(cluster(book.asksSnapshot(), LiquidityWall.Side.ASK, midPrice, true));
+        candidates.addAll(findWalls(book.bidsSnapshot(), LiquidityWall.Side.BID, midPrice));
+        candidates.addAll(findWalls(book.asksSnapshot(), LiquidityWall.Side.ASK, midPrice));
 
         for (Candidate c : candidates) {
             LiquidityWall match = findMatch(c);
@@ -111,47 +111,78 @@ public class WallDetector {
         return best;
     }
 
-    /** Cluster a sorted side of the book into candidate walls. */
-    private List<Candidate> cluster(NavigableMap<Integer, Integer> side, LiquidityWall.Side wallSide,
-                                    double midPrice, boolean ascending) {
+    /**
+     * Find <b>dominant</b> walls on one side of the book within the scan range.
+     *
+     * <p>A wall is NOT just any heavy area: a single ordinary level on a dense
+     * book (like gold) is meaningless. We only treat a level as a wall when it
+     * both clears an absolute floor ({@code wallMinSize}) AND stands out from its
+     * surroundings by at least {@code wallDominanceRatio}x the average resting
+     * size of the levels around it. Adjacent dominant levels (within
+     * {@code wallClusterTicks}) are merged into one wall and their sizes summed.
+     *
+     * <p>This is the fix for the previous behaviour, which summed the entire
+     * contiguous book into one giant "wall" and therefore always found a target
+     * on both sides - causing entries on ordinary noise.
+     */
+    private List<Candidate> findWalls(NavigableMap<Integer, Integer> side, LiquidityWall.Side wallSide,
+                                      double midPrice) {
         List<Candidate> out = new ArrayList<>();
-        int clusterStart = Integer.MIN_VALUE;
-        int lastLevel = Integer.MIN_VALUE;
-        int sum = 0;
-        int maxSize = -1;
-        int maxLevel = 0;
-
-        for (Map.Entry<Integer, Integer> e : side.entrySet()) {
-            int level = e.getKey();
-            int size = e.getValue();
-            if (clusterStart == Integer.MIN_VALUE) {
-                clusterStart = level;
-            } else if (level - lastLevel > settings.wallClusterTicks) {
-                emit(out, wallSide, sum, maxSize, maxLevel, midPrice);
-                sum = 0;
-                maxSize = -1;
-            }
-            sum += size;
-            if (size > maxSize) {
-                maxSize = size;
-                maxLevel = level;
-            }
-            lastLevel = level;
+        if (side.isEmpty()) {
+            return out;
         }
-        emit(out, wallSide, sum, maxSize, maxLevel, midPrice);
+
+        int rangeTicks = Math.max(1, (int) Math.ceil(settings.maxWallDistanceDollars / pips));
+        int midLevel = (int) Math.round(midPrice / pips);
+        int lo = midLevel - rangeTicks;
+        int hi = midLevel + rangeTicks;
+
+        List<int[]> levels = new ArrayList<>(); // [level, size]
+        long total = 0;
+        for (Map.Entry<Integer, Integer> e : side.subMap(lo, true, hi, true).entrySet()) {
+            levels.add(new int[] {e.getKey(), e.getValue()});
+            total += e.getValue();
+        }
+        if (levels.isEmpty()) {
+            return out;
+        }
+
+        double avg = (double) total / levels.size();
+        double dominanceFloor = avg * settings.wallDominanceRatio;
+
+        int i = 0;
+        while (i < levels.size()) {
+            int[] lv = levels.get(i);
+            boolean dominant = lv[1] >= settings.wallMinSize && lv[1] >= dominanceFloor;
+            if (!dominant) {
+                i++;
+                continue;
+            }
+            // Merge a run of adjacent dominant levels into a single wall.
+            int sumSize = lv[1];
+            int maxSize = lv[1];
+            int maxLevel = lv[0];
+            int lastLevel = lv[0];
+            int j = i + 1;
+            while (j < levels.size()
+                    && levels.get(j)[0] - lastLevel <= settings.wallClusterTicks
+                    && levels.get(j)[1] >= dominanceFloor) {
+                int[] n = levels.get(j);
+                sumSize += n[1];
+                if (n[1] > maxSize) {
+                    maxSize = n[1];
+                    maxLevel = n[0];
+                }
+                lastLevel = n[0];
+                j++;
+            }
+            double price = maxLevel * pips;
+            if (Math.abs(price - midPrice) <= settings.maxWallDistanceDollars) {
+                out.add(new Candidate(wallSide, maxLevel, price, sumSize));
+            }
+            i = j;
+        }
         return out;
-    }
-
-    private void emit(List<Candidate> out, LiquidityWall.Side side, int sum, int maxSize, int maxLevel,
-                      double midPrice) {
-        if (sum < settings.wallMinSize || maxSize < 0) {
-            return;
-        }
-        double price = maxLevel * pips;
-        if (Math.abs(price - midPrice) > settings.maxWallDistanceDollars) {
-            return;
-        }
-        out.add(new Candidate(side, maxLevel, price, sum));
     }
 
     /** Confirmed walls of a side, nearest to {@code price} first. */

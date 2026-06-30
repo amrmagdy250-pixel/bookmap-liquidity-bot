@@ -345,6 +345,8 @@ public class LiquidityWallStrategy implements
                         v -> settings.stopLossDollars = v),
                 spinner("Wall min size", settings.wallMinSize, 1, 100000, 1,
                         v -> settings.wallMinSize = (int) v),
+                spinner("Wall dominance (x avg)", settings.wallDominanceRatio, 1, 100, 0.5,
+                        v -> settings.wallDominanceRatio = v),
                 spinner("Wall cluster (ticks)", settings.wallClusterTicks, 0, 50, 1,
                         v -> settings.wallClusterTicks = (int) v),
                 spinner("Wall persistence (ms)", settings.wallPersistenceMs, 0, 60000, 100,

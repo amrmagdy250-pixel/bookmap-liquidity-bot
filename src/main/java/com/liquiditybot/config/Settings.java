@@ -39,6 +39,14 @@ public class Settings {
     /** Minimum clustered resting size for a level area to count as a wall. */
     public int wallMinSize = 40;
 
+    /**
+     * A wall must also be <b>dominant</b>: at least this many times the average
+     * resting size of the levels around it within the scan range. This is what
+     * stops an ordinary level on a dense book (e.g. gold) from being mistaken
+     * for a wall. Raise it to demand more obvious walls, lower it for subtler ones.
+     */
+    public double wallDominanceRatio = 3.0;
+
     /** Adjacent levels within this many ticks are merged into one wall. */
     public int wallClusterTicks = 3;
 
