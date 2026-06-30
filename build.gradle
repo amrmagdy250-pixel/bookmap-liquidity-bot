@@ -2,9 +2,14 @@ plugins {
     id 'java'
 }
 
-// Bookmap runs on Java 17. Keep bytecode compatible.
-sourceCompatibility = JavaVersion.VERSION_17
-targetCompatibility = JavaVersion.VERSION_17
+// Target Java 11 bytecode for maximum compatibility: it loads on Bookmap
+// installs running either a Java 11 or a Java 17 JRE. (A Java 17 class fails to
+// load on a Java 11 JRE, which makes Bookmap report "no entry points found".)
+sourceCompatibility = JavaVersion.VERSION_11
+targetCompatibility = JavaVersion.VERSION_11
+tasks.withType(JavaCompile).configureEach {
+    options.release = 11
+}
 
 repositories {
     mavenCentral()
