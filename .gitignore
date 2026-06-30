@@ -1,0 +1,19 @@
+# Build output
+.gradle/
+build/
+
+# Black-box runtime logs (generated while the bot runs)
+logs/
+*.jsonl
+
+# IDE
+.idea/
+*.iml
+.eclipse/
+.settings/
+.classpath
+.project
+bin/
+
+# OS
+.DS_Store
