@@ -1,0 +1,35 @@
+plugins {
+    id 'java'
+}
+
+// Bookmap runs on Java 17. Keep bytecode compatible.
+sourceCompatibility = JavaVersion.VERSION_17
+targetCompatibility = JavaVersion.VERSION_17
+
+repositories {
+    mavenCentral()
+    maven {
+        url "https://maven.bookmap.com/maven2/releases/"
+    }
+}
+
+ext {
+    // Bookmap public API version. compileOnly: the classes are provided by
+    // Bookmap itself at runtime, so they must NOT be bundled into the jar.
+    bookmapApiVersion = '7.6.0.20'
+}
+
+dependencies {
+    compileOnly group: 'com.bookmap.api', name: 'api-core', version: bookmapApiVersion
+    compileOnly group: 'com.bookmap.api', name: 'api-simplified', version: bookmapApiVersion
+
+    // Provided by Bookmap at runtime as well.
+    compileOnly group: 'org.apache.commons', name: 'commons-lang3', version: '3.11'
+    compileOnly group: 'com.ibm.icu', name: 'icu4j', version: '71.1'
+}
+
+jar {
+    // This is the file you load into Bookmap (Settings -> Configure API plugins -> Add).
+    archiveBaseName = 'liquidity-wall-bot'
+    archiveVersion = ''
+}
