@@ -87,6 +87,24 @@ public class TradeManager {
         return activeWallId;
     }
 
+    /** True while a position is live (used to draw the entry/TP/SL lines). */
+    public boolean isOpen() {
+        return state == State.OPEN;
+    }
+
+    /** Entry / take-profit / stop-loss levels in real price dollars (only valid while open). */
+    public double getEntryPrice() {
+        return entryPrice;
+    }
+
+    public double getTakeProfitPrice() {
+        return tpPrice;
+    }
+
+    public double getStopLossPrice() {
+        return slPrice;
+    }
+
     /** Act on an entry signal produced by the wave tracker. Returns true if a trade was opened/requested. */
     public boolean onEntrySignal(WaveTracker.EntrySignal sig, LiquidityWall wall) {
         if (!canEnter()) {
@@ -106,6 +124,8 @@ public class TradeManager {
                 "wallPrice", round(sig.wallPrice),
                 "waveAmplitude", round(sig.waveAmplitude),
                 "distanceFromWall", round(sig.distanceFromWall),
+                "peakPrice", round(sig.peakPrice),
+                "recentExtreme", round(sig.recentExtreme),
                 "shadow", shadow);
 
         if (shadow) {

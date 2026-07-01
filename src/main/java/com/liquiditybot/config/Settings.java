@@ -98,6 +98,28 @@ public class Settings {
     /** Price must turn back toward the wall by this much to confirm the entry. */
     public double turnConfirmDollars = 1.0;
 
+    // ---- Smart peak filter ("sniper") ---------------------------------------
+
+    /**
+     * When on, the bot behaves like a sniper: before entering short it checks
+     * the recent price peaks and refuses to sell into a fresh runaway breakout
+     * (a brand-new high with nothing above it), which is exactly what caused the
+     * one losing trade. It only enters when price is turning at or under an
+     * established recent extreme, where the move back toward the wall is likely.
+     */
+    public boolean peakFilterEnabled = true;
+
+    /** How far back (ms) to look at recent peaks/troughs when judging quality. */
+    public long peakLookbackMs = 300000;
+
+    /**
+     * How far beyond the recent extreme still counts as "the same level" rather
+     * than a breakout. A turn within this many dollars of the last comparable
+     * peak is treated as an established extreme (good entry); a turn that pushes
+     * more than this past it is a runaway breakout (skipped as risky).
+     */
+    public double peakBreakoutToleranceDollars = 1.5;
+
     // ---- Pacing --------------------------------------------------------------
 
     /** Cool-down after a trade closes before another may open. */

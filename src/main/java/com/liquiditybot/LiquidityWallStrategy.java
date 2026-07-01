@@ -87,6 +87,9 @@ public class LiquidityWallStrategy implements
     private TradeManager tradeManager;
     private StatsIndicators stats;
     private Indicator activeWallIndicator;
+    private Indicator entryLineIndicator;
+    private Indicator tpLineIndicator;
+    private Indicator slLineIndicator;
 
     private long nowMs = 0;
     private long lastDetectMs = 0;
@@ -124,6 +127,18 @@ public class LiquidityWallStrategy implements
         this.activeWallIndicator = api.registerIndicator("Active wall target", GraphType.PRIMARY);
         this.activeWallIndicator.setColor(new Color(255, 140, 0));
         this.activeWallIndicator.setWidth(2);
+
+        // Entry / take-profit / stop-loss lines on the price chart so the open
+        // trade is always visible (they only draw while a position is live).
+        this.entryLineIndicator = api.registerIndicator("Trade entry", GraphType.PRIMARY);
+        this.entryLineIndicator.setColor(new Color(255, 255, 255));
+        this.entryLineIndicator.setWidth(2);
+        this.tpLineIndicator = api.registerIndicator("Take profit", GraphType.PRIMARY);
+        this.tpLineIndicator.setColor(new Color(60, 200, 90));
+        this.tpLineIndicator.setWidth(2);
+        this.slLineIndicator = api.registerIndicator("Stop loss", GraphType.PRIMARY);
+        this.slLineIndicator.setColor(new Color(220, 70, 70));
+        this.slLineIndicator.setWidth(2);
 
         blackBox.log(nowMs, "INIT", "alias", alias, "pips", pips, "multiplier", info.multiplier,
                 "enableTrading", settings.enableTrading, "magnetMode", settings.magnetMode,
@@ -197,6 +212,8 @@ public class LiquidityWallStrategy implements
         tradeManager.setNow(nowMs);
         tradeManager.onPrice(price);
 
+        drawTradeLines();
+
         if (!tradeManager.isFlat()) {
             return;
         }
@@ -210,7 +227,7 @@ public class LiquidityWallStrategy implements
         }
 
         if (waveTracker.isArmed() && tradeManager.canEnter()) {
-            WaveTracker.EntrySignal sig = waveTracker.onPrice(price);
+            WaveTracker.EntrySignal sig = waveTracker.onPrice(price, nowMs);
             if (sig != null) {
                 LiquidityWall wall = findWall(activeTargetId);
                 if (wall != null
@@ -218,7 +235,25 @@ public class LiquidityWallStrategy implements
                         && tradeManager.onEntrySignal(sig, wall)) {
                     tradesPerWall.merge(wall.id, 1, Integer::sum);
                 }
+            } else if (waveTracker.lastSkipReason != null) {
+                blackBox.log(nowMs, "ENTRY_SKIPPED", "wallId", activeTargetId,
+                        "reason", waveTracker.lastSkipReason);
+                waveTracker.lastSkipReason = null;
             }
+        }
+    }
+
+    /**
+     * Draw the entry / take-profit / stop-loss lines while a trade is open so it
+     * is always visible on the chart (Bookmap draws nothing itself in shadow
+     * mode). Plotting stops when flat, leaving a clean gap between trades. The
+     * price axis is in tick indices, so real-dollar levels are divided by pips.
+     */
+    private void drawTradeLines() {
+        if (tradeManager.isOpen()) {
+            entryLineIndicator.addPoint(tradeManager.getEntryPrice() / pips);
+            tpLineIndicator.addPoint(tradeManager.getTakeProfitPrice() / pips);
+            slLineIndicator.addPoint(tradeManager.getStopLossPrice() / pips);
         }
     }
 
@@ -351,8 +386,16 @@ public class LiquidityWallStrategy implements
             persist();
         });
 
+        JCheckBox peakBox = new JCheckBox("Smart peak filter (skip runaway breakout entries)",
+                settings.peakFilterEnabled);
+        peakBox.addActionListener(e -> {
+            settings.peakFilterEnabled = peakBox.isSelected();
+            persist();
+        });
+
         main.add(tradingBox);
         main.add(magnetBox);
+        main.add(peakBox);
         main.add(grid(
                 spinner("Take profit ($)", settings.takeProfitDollars, 0.25, 1000, 0.25,
                         v -> settings.takeProfitDollars = v),
@@ -378,6 +421,8 @@ public class LiquidityWallStrategy implements
                         v -> settings.maxEntryDistanceFromWallDollars = v),
                 spinner("Turn confirm ($)", settings.turnConfirmDollars, 0, 100, 0.25,
                         v -> settings.turnConfirmDollars = v),
+                spinner("Peak breakout tol ($)", settings.peakBreakoutToleranceDollars, 0, 100, 0.25,
+                        v -> settings.peakBreakoutToleranceDollars = v),
                 spinner("Order size", settings.orderSize, 1, 1000, 1,
                         v -> settings.orderSize = (int) v),
                 spinner("Cooldown after trade (ms)", settings.cooldownMsAfterTrade, 0, 600000, 500,
