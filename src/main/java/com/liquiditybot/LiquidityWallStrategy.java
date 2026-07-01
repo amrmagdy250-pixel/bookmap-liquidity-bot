@@ -18,6 +18,7 @@ import com.liquiditybot.blackbox.BlackBox;
 import com.liquiditybot.book.LiquidityWall;
 import com.liquiditybot.book.OrderBook;
 import com.liquiditybot.config.Settings;
+import com.liquiditybot.detection.SwingMemory;
 import com.liquiditybot.detection.WallDetector;
 import com.liquiditybot.detection.WaveTracker;
 import com.liquiditybot.indicators.StatsIndicators;
@@ -83,6 +84,7 @@ public class LiquidityWallStrategy implements
     private BlackBox blackBox;
     private OrderBook book;
     private WallDetector detector;
+    private SwingMemory swings;
     private WaveTracker waveTracker;
     private TradeManager tradeManager;
     private StatsIndicators stats;
@@ -109,7 +111,8 @@ public class LiquidityWallStrategy implements
         this.book = new OrderBook(pips);
         this.stats = new StatsIndicators(api);
         this.tradeManager = new TradeManager(api, alias, settings, blackBox, stats, info.multiplier, pips);
-        this.waveTracker = new WaveTracker(settings);
+        this.swings = new SwingMemory(settings);
+        this.waveTracker = new WaveTracker(settings, swings);
         this.detector = new WallDetector(settings, pips, new WallDetector.Listener() {
             @Override
             public void onWallConfirmed(LiquidityWall wall, long now) {
@@ -211,6 +214,7 @@ public class LiquidityWallStrategy implements
     private void onPriceUpdate(double price) {
         tradeManager.setNow(nowMs);
         tradeManager.onPrice(price);
+        swings.onPrice(price, nowMs);
 
         drawTradeLines();
 
@@ -423,6 +427,8 @@ public class LiquidityWallStrategy implements
                         v -> settings.turnConfirmDollars = v),
                 spinner("Peak breakout tol ($)", settings.peakBreakoutToleranceDollars, 0, 100, 0.25,
                         v -> settings.peakBreakoutToleranceDollars = v),
+                spinner("Pivot reversal ($)", settings.pivotReversalDollars, 0.25, 100, 0.25,
+                        v -> settings.pivotReversalDollars = v),
                 spinner("Order size", settings.orderSize, 1, 1000, 1,
                         v -> settings.orderSize = (int) v),
                 spinner("Cooldown after trade (ms)", settings.cooldownMsAfterTrade, 0, 600000, 500,

@@ -110,7 +110,14 @@ public class Settings {
     public boolean peakFilterEnabled = true;
 
     /** How far back (ms) to look at recent peaks/troughs when judging quality. */
-    public long peakLookbackMs = 300000;
+    public long peakLookbackMs = 900000;
+
+    /**
+     * A swing pivot (a peak or a trough) is only recorded once price reverses
+     * from an extreme by at least this many dollars. Bigger = only major peaks
+     * are remembered; smaller = every little wiggle counts as a peak.
+     */
+    public double pivotReversalDollars = 3.0;
 
     /**
      * How far beyond the recent extreme still counts as "the same level" rather
