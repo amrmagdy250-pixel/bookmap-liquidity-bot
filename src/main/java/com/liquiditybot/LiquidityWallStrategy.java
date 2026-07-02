@@ -241,7 +241,9 @@ public class LiquidityWallStrategy implements
                 }
             } else if (waveTracker.lastSkipReason != null) {
                 blackBox.log(nowMs, "ENTRY_SKIPPED", "wallId", activeTargetId,
-                        "reason", waveTracker.lastSkipReason);
+                        "reason", waveTracker.lastSkipReason,
+                        "peakPrice", waveTracker.lastSkipPeak,
+                        "recentExtreme", waveTracker.lastSkipExtreme);
                 waveTracker.lastSkipReason = null;
             }
         }

@@ -55,6 +55,8 @@ public class WaveTracker {
 
     /** Reason the most recent turn was rejected, for diagnostics. */
     public String lastSkipReason = null;
+    public double lastSkipPeak = Double.NaN;
+    public double lastSkipExtreme = Double.NaN;
 
     private final Settings settings;
     private final SwingMemory swings;
@@ -142,14 +144,28 @@ public class WaveTracker {
                 ? swings.recentHigh(nowMs)
                 : swings.recentLow(nowMs);
 
-        if (settings.peakFilterEnabled && !Double.isNaN(recentExtreme)) {
+        if (settings.peakFilterEnabled) {
+            if (Double.isNaN(recentExtreme)) {
+                // Sniper mode needs history to judge the turn: no confirmed
+                // pivots in the lookback window means we cannot tell an
+                // established extreme from a runaway move -> stand aside.
+                fired = true;
+                lastSkipReason = "NO_PEAK_HISTORY";
+                lastSkipPeak = peakPrice;
+                lastSkipExtreme = Double.NaN;
+                return null;
+            }
             // A runaway breakout means this peak pushed past every comparable
             // recent extreme by more than the tolerance (short: a new high; long:
             // a new low). That is momentum against us -> skip.
-            double breakout = (peakPrice - recentExtreme) * sign; // >0 => new, more-extreme peak
+            // Away-from-wall is the decreasing-x direction, so the peak is more
+            // extreme than the reference when its x is LOWER: sign*(extreme-peak).
+            double breakout = sign * (recentExtreme - peakPrice); // >0 => new, more-extreme peak
             if (breakout > settings.peakBreakoutToleranceDollars) {
                 fired = true; // don't re-fire on this same trough
                 lastSkipReason = "BREAKOUT_PEAK";
+                lastSkipPeak = peakPrice;
+                lastSkipExtreme = recentExtreme;
                 return null;
             }
         }
