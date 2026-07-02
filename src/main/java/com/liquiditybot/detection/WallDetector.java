@@ -140,21 +140,17 @@ public class WallDetector {
         int hi = midLevel + rangeTicks;
 
         List<int[]> levels = new ArrayList<>(); // [level, size]
-        long total = 0;
         for (Map.Entry<Integer, Integer> e : side.subMap(lo, true, hi, true).entrySet()) {
             levels.add(new int[] {e.getKey(), e.getValue()});
-            total += e.getValue();
         }
         if (levels.isEmpty()) {
             return out;
         }
 
-        double avg = (double) total / levels.size();
-        double dominanceFloor = avg * settings.wallDominanceRatio;
-
         int i = 0;
         while (i < levels.size()) {
             int[] lv = levels.get(i);
+            double dominanceFloor = localAverage(levels, i) * settings.wallDominanceRatio;
             boolean dominant = lv[1] >= settings.wallMinSize && lv[1] >= dominanceFloor;
             if (!dominant) {
                 i++;
@@ -185,6 +181,29 @@ public class WallDetector {
             i = j;
         }
         return out;
+    }
+
+    /**
+     * Average resting size of the levels within {@code wallNeighborhoodTicks} of
+     * the candidate at {@code idx}, excluding the candidate itself. Judging
+     * dominance against the immediate neighborhood (instead of the whole scan
+     * range) stops an ordinary level surrounded by similar sizes from passing
+     * just because far-away sparse levels dilute the average.
+     */
+    private double localAverage(List<int[]> levels, int idx) {
+        int center = levels.get(idx)[0];
+        long sum = 0;
+        int count = 0;
+        for (int k = 0; k < levels.size(); k++) {
+            if (k == idx) {
+                continue;
+            }
+            if (Math.abs(levels.get(k)[0] - center) <= settings.wallNeighborhoodTicks) {
+                sum += levels.get(k)[1];
+                count++;
+            }
+        }
+        return count == 0 ? 0.0 : (double) sum / count;
     }
 
     /** Confirmed walls of a side, nearest to {@code price} first. */

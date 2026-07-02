@@ -61,6 +61,14 @@ public class Settings {
      */
     public double wallDominanceRatio = 3.0;
 
+    /**
+     * Dominance is judged against the average resting size of the levels within
+     * this many ticks around the candidate (excluding the candidate itself).
+     * A local window keeps one thin far-away region from diluting the average
+     * and letting an ordinary level pass as a "wall".
+     */
+    public int wallNeighborhoodTicks = 50;
+
     /** Adjacent levels within this many ticks are merged into one wall. */
     public int wallClusterTicks = 3;
 
