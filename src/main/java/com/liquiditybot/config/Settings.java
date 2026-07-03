@@ -173,6 +173,13 @@ public class Settings {
     public long reentryMemoryMs = 3600000;
 
     /**
+     * Hard cooldown per wall: after a trade is taken toward a wall, no new trade
+     * toward a wall at that price is allowed for this long (ms), regardless of
+     * how deep the new extreme is. Default 12 minutes.
+     */
+    public long reentryCooldownMs = 720000;
+
+    /**
      * After the first bounce, the pullback must hold above the adverse extreme
      * (higher low) and price must turn back up off it by this much ($) before
      * the recovery entry fires. This separates a genuine correction from a

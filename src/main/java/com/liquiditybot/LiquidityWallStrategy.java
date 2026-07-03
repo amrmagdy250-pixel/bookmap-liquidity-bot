@@ -300,9 +300,10 @@ public class LiquidityWallStrategy implements
                 LiquidityWall wall = findWall(activeTargetId);
                 if (wall != null
                         && tradesPerWall.getOrDefault(wall.id, 0) < settings.maxTradesPerWall) {
-                    if (!reentryAllowed(sig, wall)) {
+                    String block = reentryBlockReason(sig, wall);
+                    if (block != null) {
                         blackBox.log(nowMs, "ENTRY_SKIPPED", "wallId", wall.id,
-                                "reason", "SAME_ZONE_REENTRY",
+                                "reason", block,
                                 "peakPrice", sig.peakPrice,
                                 "prevEntryExtreme", previousEntryExtreme(sig, wall));
                     } else if (tradeManager.onEntrySignal(sig, wall)) {
@@ -421,20 +422,28 @@ public class LiquidityWallStrategy implements
     // --- same-zone re-entry guard ----------------------------------------------
 
     /**
-     * A new entry toward a wall at the same price level must start from a pivot
-     * that is deeper (farther from the wall) than the previous entry's pivot by
-     * the configured margin. In sign-adjusted coordinates deeper == smaller x.
+     * A new entry toward a wall at the same price level must (a) wait out the
+     * per-wall cooldown and (b) start from a pivot that is deeper (farther from
+     * the wall) than the previous entry's pivot by the configured margin. In
+     * sign-adjusted coordinates deeper == smaller x. Returns the skip reason,
+     * or null when the entry is allowed.
      */
-    private boolean reentryAllowed(WaveTracker.EntrySignal sig, LiquidityWall wall) {
+    private String reentryBlockReason(WaveTracker.EntrySignal sig, LiquidityWall wall) {
         if (!settings.reentryDeeperExtremeEnabled) {
-            return true;
+            return null;
         }
         double[] prev = lastEntryExtremeByLevel.get(Math.round(wall.price / pips));
         if (prev == null || nowMs - (long) prev[1] > settings.reentryMemoryMs) {
-            return true;
+            return null;
+        }
+        if (nowMs - (long) prev[1] < settings.reentryCooldownMs) {
+            return "SAME_WALL_COOLDOWN";
         }
         double newX = sig.side.sign * sig.peakPrice;
-        return newX <= prev[0] - settings.reentryMinExtremeAdvanceDollars;
+        if (newX > prev[0] - settings.reentryMinExtremeAdvanceDollars) {
+            return "SAME_ZONE_REENTRY";
+        }
+        return null;
     }
 
     private double previousEntryExtreme(WaveTracker.EntrySignal sig, LiquidityWall wall) {
@@ -615,6 +624,8 @@ public class LiquidityWallStrategy implements
                         v -> settings.spoofWindowMs = (long) v),
                 spinner("Re-entry advance ($)", settings.reentryMinExtremeAdvanceDollars, 0, 100, 0.25,
                         v -> settings.reentryMinExtremeAdvanceDollars = v),
+                spinner("Re-entry cooldown (ms)", settings.reentryCooldownMs, 0, 3600000, 60000,
+                        v -> settings.reentryCooldownMs = (long) v),
                 spinner("Order size", settings.orderSize, 1, 1000, 1,
                         v -> settings.orderSize = (int) v),
                 spinner("Cooldown after trade (ms)", settings.cooldownMsAfterTrade, 0, 600000, 500,
