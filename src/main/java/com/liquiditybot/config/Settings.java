@@ -135,6 +135,37 @@ public class Settings {
      */
     public double peakBreakoutToleranceDollars = 1.5;
 
+    // ---- Revenge engine (post-stop recovery) --------------------------------
+
+    /**
+     * A separate "revenge" logic: after a trade is stopped out, price is usually
+     * in the middle of an adverse excursion. This engine waits for that excursion
+     * to exhaust and price to start <b>correcting back</b>, then takes one
+     * recovery trade in the <b>same direction</b> as the original target wall
+     * (i.e. the same side as the stopped trade) to make back the loss. It is a
+     * self-contained module and does not touch the normal wall/wave entry path.
+     */
+    public boolean revengeEnabled = true;
+
+    /** Maximum recovery trades allowed for a single stop-out event. */
+    public int revengeMaxAttempts = 1;
+
+    /**
+     * The adverse journey after the stop must be at least this big (price
+     * dollars) beyond the stop price before a recovery is considered. This makes
+     * sure there is a real move to correct from, not an instant snap-back.
+     */
+    public double revengeMinExcursionDollars = 3.0;
+
+    /**
+     * Once the adverse extreme is in, price must correct back toward the original
+     * direction by at least this many dollars to trigger the recovery entry.
+     */
+    public double revengeReversalDollars = 3.0;
+
+    /** Give up looking for a recovery this long (ms) after the stop-out. */
+    public long revengeWindowMs = 600000;
+
     // ---- Pacing --------------------------------------------------------------
 
     /** Cool-down after a trade closes before another may open. */

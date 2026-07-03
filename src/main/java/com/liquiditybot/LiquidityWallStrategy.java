@@ -18,6 +18,7 @@ import com.liquiditybot.blackbox.BlackBox;
 import com.liquiditybot.book.LiquidityWall;
 import com.liquiditybot.book.OrderBook;
 import com.liquiditybot.config.Settings;
+import com.liquiditybot.detection.RevengeEngine;
 import com.liquiditybot.detection.SwingMemory;
 import com.liquiditybot.detection.WallDetector;
 import com.liquiditybot.detection.WaveTracker;
@@ -86,6 +87,7 @@ public class LiquidityWallStrategy implements
     private WallDetector detector;
     private SwingMemory swings;
     private WaveTracker waveTracker;
+    private RevengeEngine revengeEngine;
     private TradeManager tradeManager;
     private StatsIndicators stats;
     private Indicator activeWallIndicator;
@@ -113,6 +115,19 @@ public class LiquidityWallStrategy implements
         this.tradeManager = new TradeManager(api, alias, settings, blackBox, stats, info.multiplier, pips);
         this.swings = new SwingMemory(settings);
         this.waveTracker = new WaveTracker(settings, swings);
+        this.revengeEngine = new RevengeEngine(settings);
+        // A stop-out arms the revenge engine; a win clears it. This is the only
+        // place the strategy couples the trade lifecycle to the recovery logic.
+        this.tradeManager.setCloseListener((side, exitPrice, reason, wasRevenge) -> {
+            if ("STOP_LOSS".equals(reason)) {
+                if (!wasRevenge) {
+                    revengeEngine.reset(); // fresh stop event: allow attempts again
+                }
+                revengeEngine.arm(side, exitPrice, nowMs);
+            } else {
+                revengeEngine.reset(); // took profit (or any non-stop exit): stand down
+            }
+        });
         this.detector = new WallDetector(settings, pips, new WallDetector.Listener() {
             @Override
             public void onWallConfirmed(LiquidityWall wall, long now) {
@@ -221,6 +236,17 @@ public class LiquidityWallStrategy implements
         if (!tradeManager.isFlat()) {
             return;
         }
+
+        // Revenge engine gets first refusal after a stop-out: if price has made
+        // its adverse journey and is correcting back, take the recovery trade in
+        // the same direction as the stopped trade before anything else.
+        if (revengeEngine.isArmed() && tradeManager.canEnter()
+                && revengeEngine.onPrice(price, nowMs)) {
+            tradeManager.openRevenge(revengeEngine.side(), revengeEngine.lastEntryPrice(),
+                    Double.NaN, revengeEngine.lastAdverseExtreme());
+            return;
+        }
+
         ensureTarget(price);
 
         if (activeTargetId != -1) {
@@ -399,9 +425,17 @@ public class LiquidityWallStrategy implements
             persist();
         });
 
+        JCheckBox revengeBox = new JCheckBox("Revenge engine (recover after a stop-out)",
+                settings.revengeEnabled);
+        revengeBox.addActionListener(e -> {
+            settings.revengeEnabled = revengeBox.isSelected();
+            persist();
+        });
+
         main.add(tradingBox);
         main.add(magnetBox);
         main.add(peakBox);
+        main.add(revengeBox);
         main.add(grid(
                 spinner("Take profit ($)", settings.takeProfitDollars, 0.25, 1000, 0.25,
                         v -> settings.takeProfitDollars = v),
@@ -431,6 +465,14 @@ public class LiquidityWallStrategy implements
                         v -> settings.peakBreakoutToleranceDollars = v),
                 spinner("Pivot reversal ($)", settings.pivotReversalDollars, 0.25, 100, 0.25,
                         v -> settings.pivotReversalDollars = v),
+                spinner("Revenge max attempts", settings.revengeMaxAttempts, 0, 10, 1,
+                        v -> settings.revengeMaxAttempts = (int) v),
+                spinner("Revenge min excursion ($)", settings.revengeMinExcursionDollars, 0, 1000, 0.5,
+                        v -> settings.revengeMinExcursionDollars = v),
+                spinner("Revenge reversal ($)", settings.revengeReversalDollars, 0.25, 1000, 0.25,
+                        v -> settings.revengeReversalDollars = v),
+                spinner("Revenge window (ms)", settings.revengeWindowMs, 0, 3600000, 1000,
+                        v -> settings.revengeWindowMs = (long) v),
                 spinner("Order size", settings.orderSize, 1, 1000, 1,
                         v -> settings.orderSize = (int) v),
                 spinner("Cooldown after trade (ms)", settings.cooldownMsAfterTrade, 0, 600000, 500,

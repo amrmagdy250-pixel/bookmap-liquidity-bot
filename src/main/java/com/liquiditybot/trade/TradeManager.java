@@ -26,6 +26,11 @@ public class TradeManager {
 
     private enum State { FLAT, ENTERING, OPEN, EXITING }
 
+    /** Notified whenever a position closes, so the strategy can react (e.g. arm the revenge engine). */
+    public interface CloseListener {
+        void onClose(TradeSide side, double exitPrice, String reason, boolean wasRevenge);
+    }
+
     private final Api api;
     private final String alias;
     private final Settings settings;
@@ -46,6 +51,9 @@ public class TradeManager {
     private long entryTime;
     private double wallPrice;
     private long activeWallId = -1;
+    private boolean currentIsRevenge = false;
+
+    private CloseListener closeListener;
 
     private double lastExecPrice = Double.NaN;
     private double exitFillPrice = Double.NaN;
@@ -73,6 +81,10 @@ public class TradeManager {
 
     public void setNow(long nowMs) {
         this.nowMs = nowMs;
+    }
+
+    public void setCloseListener(CloseListener listener) {
+        this.closeListener = listener;
     }
 
     public boolean isFlat() {
@@ -116,6 +128,7 @@ public class TradeManager {
         this.wallPrice = sig.wallPrice;
         this.activeWallId = wall.id;
         this.entryTime = nowMs;
+        this.currentIsRevenge = false;
 
         blackBox.log(nowMs, "ENTRY_SIGNAL",
                 "tradeId", currentTradeId,
@@ -130,6 +143,42 @@ public class TradeManager {
 
         if (shadow) {
             openPosition(sig.entryPrice);
+        } else {
+            state = State.ENTERING;
+            api.sendOrder(new SimpleOrderSendParametersBuilder(alias, side.isBuy, settings.orderSize).build());
+        }
+        return true;
+    }
+
+    /**
+     * Open a recovery ("revenge") trade requested by the {@link com.liquiditybot.detection.RevengeEngine}.
+     * Same lifecycle as a normal entry (self-managed TP/SL, shadow-aware) but
+     * tagged as a revenge trade in the log and driven by price action rather than
+     * a live wall. Returns true if a trade was opened/requested.
+     */
+    public boolean openRevenge(TradeSide side, double entryPrice, double refWallPrice,
+                               double adverseExtreme) {
+        if (!canEnter()) {
+            return false;
+        }
+        this.shadow = !settings.enableTrading;
+        this.currentTradeId = ++tradeSeq;
+        this.side = side;
+        this.wallPrice = refWallPrice;
+        this.activeWallId = -1;
+        this.entryTime = nowMs;
+        this.currentIsRevenge = true;
+
+        blackBox.log(nowMs, "REVENGE_ENTRY_SIGNAL",
+                "tradeId", currentTradeId,
+                "side", side,
+                "signalPrice", round(entryPrice),
+                "adverseExtreme", round(adverseExtreme),
+                "refWallPrice", round(refWallPrice),
+                "shadow", shadow);
+
+        if (shadow) {
+            openPosition(entryPrice);
         } else {
             state = State.ENTERING;
             api.sendOrder(new SimpleOrderSendParametersBuilder(alias, side.isBuy, settings.orderSize).build());
@@ -195,7 +244,12 @@ public class TradeManager {
                 "wins", stats.getWins(),
                 "losses", stats.getLosses(),
                 "winRatePct", round(stats.getWinRatePct()),
+                "revenge", currentIsRevenge,
                 "shadow", shadow);
+
+        if (closeListener != null) {
+            closeListener.onClose(side, exitPrice, exitReason, currentIsRevenge);
+        }
 
         // Start post-trade observation: keep recording where price travels.
         this.postTrackTradeId = currentTradeId;
