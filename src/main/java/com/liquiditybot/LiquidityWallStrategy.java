@@ -102,6 +102,14 @@ public class LiquidityWallStrategy implements
     /** Trades already taken per wall id, to cap entries on a single wall. */
     private final java.util.Map<Long, Integer> tradesPerWall = new java.util.HashMap<>();
 
+    // Spoof filter: recent "pulled" break times per tick level.
+    private final java.util.Map<Long, java.util.ArrayDeque<Long>> pullHistory = new java.util.HashMap<>();
+    private final java.util.Set<Long> spoofLoggedWalls = new java.util.HashSet<>();
+
+    // Same-zone re-entry guard: per tick level, the pivot extreme (sign-adjusted)
+    // and time of the last entry taken toward a wall at that level.
+    private final java.util.Map<Long, double[]> lastEntryExtremeByLevel = new java.util.HashMap<>();
+
     @Override
     public void initialize(String alias, InstrumentInfo info, Api api, InitialState initialState) {
         this.api = api;
@@ -143,6 +151,9 @@ public class LiquidityWallStrategy implements
             public void onWallBroken(LiquidityWall wall, long now, String reason) {
                 blackBox.log(now, "WALL_BROKEN", "wallId", wall.id, "side", wall.side,
                         "price", wall.price, "peakSize", wall.peakSize, "reason", reason);
+                if ("pulled".equals(reason)) {
+                    recordPull(wall.price, now);
+                }
             }
         });
 
@@ -269,9 +280,16 @@ public class LiquidityWallStrategy implements
             if (sig != null) {
                 LiquidityWall wall = findWall(activeTargetId);
                 if (wall != null
-                        && tradesPerWall.getOrDefault(wall.id, 0) < settings.maxTradesPerWall
-                        && tradeManager.onEntrySignal(sig, wall)) {
-                    tradesPerWall.merge(wall.id, 1, Integer::sum);
+                        && tradesPerWall.getOrDefault(wall.id, 0) < settings.maxTradesPerWall) {
+                    if (!reentryAllowed(sig, wall)) {
+                        blackBox.log(nowMs, "ENTRY_SKIPPED", "wallId", wall.id,
+                                "reason", "SAME_ZONE_REENTRY",
+                                "peakPrice", sig.peakPrice,
+                                "prevEntryExtreme", previousEntryExtreme(sig, wall));
+                    } else if (tradeManager.onEntrySignal(sig, wall)) {
+                        tradesPerWall.merge(wall.id, 1, Integer::sum);
+                        rememberEntryExtreme(sig, wall);
+                    }
                 }
             } else if (waveTracker.lastSkipReason != null) {
                 blackBox.log(nowMs, "ENTRY_SKIPPED", "wallId", activeTargetId,
@@ -316,12 +334,20 @@ public class LiquidityWallStrategy implements
 
         // Forget trade counts for walls that no longer exist, so memory stays bounded.
         tradesPerWall.keySet().removeIf(id -> findWall(id) == null);
+        spoofLoggedWalls.removeIf(id -> findWall(id) == null);
 
         LiquidityWall nearest = null;
         double bestDist = Double.MAX_VALUE;
         for (LiquidityWall w : detector.allConfirmed()) {
             if (tradesPerWall.getOrDefault(w.id, 0) >= settings.maxTradesPerWall) {
                 continue; // already traded this wall the maximum number of times
+            }
+            if (settings.spoofFilterEnabled && isSuspectedSpoof(w.price)) {
+                if (spoofLoggedWalls.add(w.id)) {
+                    blackBox.log(nowMs, "TARGET_SKIPPED_SPOOF", "wallId", w.id,
+                            "side", w.side, "price", w.price, "size", w.size);
+                }
+                continue; // level keeps confirming and pulling: painted, not defended
             }
             double d = Math.abs(w.price - price);
             if (d <= settings.maxWallDistanceDollars && d < bestDist) {
@@ -339,6 +365,69 @@ public class LiquidityWallStrategy implements
         blackBox.log(nowMs, "TARGET_SET", "wallId", nearest.id, "wallSide", nearest.side,
                 "wallPrice", nearest.price, "wallSize", nearest.size, "tradeSide", side,
                 "distance", Math.round(bestDist * 100.0) / 100.0);
+    }
+
+    // --- spoof filter ----------------------------------------------------------
+
+    private void recordPull(double price, long now) {
+        long level = Math.round(price / pips);
+        java.util.ArrayDeque<Long> times =
+                pullHistory.computeIfAbsent(level, k -> new java.util.ArrayDeque<>());
+        times.addLast(now);
+        while (!times.isEmpty() && now - times.peekFirst() > settings.spoofWindowMs) {
+            times.removeFirst();
+        }
+        pullHistory.values().removeIf(java.util.ArrayDeque::isEmpty);
+    }
+
+    /** True when the level (within tolerance) accumulated enough recent pulls. */
+    private boolean isSuspectedSpoof(double price) {
+        long level = Math.round(price / pips);
+        int count = 0;
+        for (long l = level - settings.spoofToleranceTicks;
+                l <= level + settings.spoofToleranceTicks; l++) {
+            java.util.ArrayDeque<Long> times = pullHistory.get(l);
+            if (times == null) {
+                continue;
+            }
+            for (long t : times) {
+                if (nowMs - t <= settings.spoofWindowMs) {
+                    count++;
+                }
+            }
+        }
+        return count >= settings.spoofPullCount;
+    }
+
+    // --- same-zone re-entry guard ----------------------------------------------
+
+    /**
+     * A new entry toward a wall at the same price level must start from a pivot
+     * that is deeper (farther from the wall) than the previous entry's pivot by
+     * the configured margin. In sign-adjusted coordinates deeper == smaller x.
+     */
+    private boolean reentryAllowed(WaveTracker.EntrySignal sig, LiquidityWall wall) {
+        if (!settings.reentryDeeperExtremeEnabled) {
+            return true;
+        }
+        double[] prev = lastEntryExtremeByLevel.get(Math.round(wall.price / pips));
+        if (prev == null || nowMs - (long) prev[1] > settings.reentryMemoryMs) {
+            return true;
+        }
+        double newX = sig.side.sign * sig.peakPrice;
+        return newX <= prev[0] - settings.reentryMinExtremeAdvanceDollars;
+    }
+
+    private double previousEntryExtreme(WaveTracker.EntrySignal sig, LiquidityWall wall) {
+        double[] prev = lastEntryExtremeByLevel.get(Math.round(wall.price / pips));
+        return prev == null ? Double.NaN : sig.side.sign * prev[0];
+    }
+
+    private void rememberEntryExtreme(WaveTracker.EntrySignal sig, LiquidityWall wall) {
+        lastEntryExtremeByLevel.put(Math.round(wall.price / pips),
+                new double[]{sig.side.sign * sig.peakPrice, nowMs});
+        lastEntryExtremeByLevel.values()
+                .removeIf(v -> nowMs - (long) v[1] > settings.reentryMemoryMs);
     }
 
     /** Magnet mode trades toward the wall; fade mode trades away from it. */
@@ -440,10 +529,26 @@ public class LiquidityWallStrategy implements
             persist();
         });
 
+        JCheckBox spoofBox = new JCheckBox("Spoof filter (skip walls that keep pulling)",
+                settings.spoofFilterEnabled);
+        spoofBox.addActionListener(e -> {
+            settings.spoofFilterEnabled = spoofBox.isSelected();
+            persist();
+        });
+
+        JCheckBox reentryBox = new JCheckBox("Re-entry needs deeper trough/peak on same wall",
+                settings.reentryDeeperExtremeEnabled);
+        reentryBox.addActionListener(e -> {
+            settings.reentryDeeperExtremeEnabled = reentryBox.isSelected();
+            persist();
+        });
+
         main.add(tradingBox);
         main.add(magnetBox);
         main.add(peakBox);
         main.add(revengeBox);
+        main.add(spoofBox);
+        main.add(reentryBox);
         main.add(grid(
                 spinner("Take profit ($)", settings.takeProfitDollars, 0.25, 1000, 0.25,
                         v -> settings.takeProfitDollars = v),
@@ -481,6 +586,12 @@ public class LiquidityWallStrategy implements
                         v -> settings.revengeReversalDollars = v),
                 spinner("Revenge window (ms)", settings.revengeWindowMs, 0, 3600000, 1000,
                         v -> settings.revengeWindowMs = (long) v),
+                spinner("Spoof pull count", settings.spoofPullCount, 1, 20, 1,
+                        v -> settings.spoofPullCount = (int) v),
+                spinner("Spoof window (ms)", settings.spoofWindowMs, 0, 3600000, 1000,
+                        v -> settings.spoofWindowMs = (long) v),
+                spinner("Re-entry advance ($)", settings.reentryMinExtremeAdvanceDollars, 0, 100, 0.25,
+                        v -> settings.reentryMinExtremeAdvanceDollars = v),
                 spinner("Order size", settings.orderSize, 1, 1000, 1,
                         v -> settings.orderSize = (int) v),
                 spinner("Cooldown after trade (ms)", settings.cooldownMsAfterTrade, 0, 600000, 500,

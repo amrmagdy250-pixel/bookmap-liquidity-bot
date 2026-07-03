@@ -135,6 +135,43 @@ public class Settings {
      */
     public double peakBreakoutToleranceDollars = 1.5;
 
+    // ---- Spoof-wall filter ---------------------------------------------------
+
+    /**
+     * A level whose wall keeps confirming and getting <b>pulled</b> over and over
+     * is being painted by a spoofer, not defended. Once a level accumulates
+     * enough pulls in the recent window it is blacklisted as a target until the
+     * pulls age out.
+     */
+    public boolean spoofFilterEnabled = true;
+
+    /** Number of "pulled" breaks at (or near) a level to flag it as spoofed. */
+    public int spoofPullCount = 2;
+
+    /** Pulls older than this (ms) no longer count against a level. */
+    public long spoofWindowMs = 600000;
+
+    /** Pulls within this many ticks of a level count as the same level. */
+    public int spoofToleranceTicks = 5;
+
+    // ---- Same-zone re-entry guard --------------------------------------------
+
+    /**
+     * A second trade on the same wall may not start from the same turning point
+     * as the previous one: price must first travel to a <b>deeper</b> extreme
+     * (lower trough for longs toward an ask wall, higher peak for shorts toward
+     * a bid wall). If the market only re-offers the exact same zone, it is
+     * usually because it failed to reach the wall the first time - re-entering
+     * there just repeats the failed trade.
+     */
+    public boolean reentryDeeperExtremeEnabled = true;
+
+    /** The new extreme must beat the previous entry's extreme by at least this ($). */
+    public double reentryMinExtremeAdvanceDollars = 1.0;
+
+    /** Forget a previous entry's extreme after this long (ms). */
+    public long reentryMemoryMs = 3600000;
+
     // ---- Revenge engine (post-stop recovery) --------------------------------
 
     /**
