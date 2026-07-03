@@ -151,9 +151,11 @@ public class Settings {
     public int revengeMaxAttempts = 1;
 
     /**
-     * The adverse journey after the stop must be at least this big (price
-     * dollars) beyond the stop price before a recovery is considered. This makes
-     * sure there is a real move to correct from, not an instant snap-back.
+     * The adverse journey - measured from the stopped trade's ENTRY price to
+     * the worst extreme reached - must be at least this big (price dollars)
+     * before a recovery is considered. A stop-out already implies a journey of
+     * the full stop distance, so with default sizing this is met immediately;
+     * raise it above the stop distance to demand extra follow-through.
      */
     public double revengeMinExcursionDollars = 3.0;
 
@@ -161,10 +163,10 @@ public class Settings {
      * Once the adverse extreme is in, price must correct back toward the original
      * direction by at least this many dollars to trigger the recovery entry.
      */
-    public double revengeReversalDollars = 3.0;
+    public double revengeReversalDollars = 2.5;
 
     /** Give up looking for a recovery this long (ms) after the stop-out. */
-    public long revengeWindowMs = 600000;
+    public long revengeWindowMs = 1200000;
 
     // ---- Pacing --------------------------------------------------------------
 

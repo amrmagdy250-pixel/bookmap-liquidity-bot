@@ -28,7 +28,7 @@ public class TradeManager {
 
     /** Notified whenever a position closes, so the strategy can react (e.g. arm the revenge engine). */
     public interface CloseListener {
-        void onClose(TradeSide side, double exitPrice, String reason, boolean wasRevenge);
+        void onClose(TradeSide side, double entryPrice, double exitPrice, String reason, boolean wasRevenge);
     }
 
     private final Api api;
@@ -248,7 +248,7 @@ public class TradeManager {
                 "shadow", shadow);
 
         if (closeListener != null) {
-            closeListener.onClose(side, exitPrice, exitReason, currentIsRevenge);
+            closeListener.onClose(side, entryPrice, exitPrice, exitReason, currentIsRevenge);
         }
 
         // Start post-trade observation: keep recording where price travels.

@@ -118,12 +118,16 @@ public class LiquidityWallStrategy implements
         this.revengeEngine = new RevengeEngine(settings);
         // A stop-out arms the revenge engine; a win clears it. This is the only
         // place the strategy couples the trade lifecycle to the recovery logic.
-        this.tradeManager.setCloseListener((side, exitPrice, reason, wasRevenge) -> {
+        this.tradeManager.setCloseListener((side, entryPrice, exitPrice, reason, wasRevenge) -> {
             if ("STOP_LOSS".equals(reason)) {
                 if (!wasRevenge) {
                     revengeEngine.reset(); // fresh stop event: allow attempts again
                 }
-                revengeEngine.arm(side, exitPrice, nowMs);
+                revengeEngine.arm(side, entryPrice, exitPrice, nowMs);
+                if (revengeEngine.isArmed()) {
+                    blackBox.log(nowMs, "REVENGE_ARMED", "side", side,
+                            "entryPrice", entryPrice, "stopPrice", exitPrice);
+                }
             } else {
                 revengeEngine.reset(); // took profit (or any non-stop exit): stand down
             }
@@ -240,11 +244,15 @@ public class LiquidityWallStrategy implements
         // Revenge engine gets first refusal after a stop-out: if price has made
         // its adverse journey and is correcting back, take the recovery trade in
         // the same direction as the stopped trade before anything else.
-        if (revengeEngine.isArmed() && tradeManager.canEnter()
-                && revengeEngine.onPrice(price, nowMs)) {
-            tradeManager.openRevenge(revengeEngine.side(), revengeEngine.lastEntryPrice(),
-                    Double.NaN, revengeEngine.lastAdverseExtreme());
-            return;
+        if (revengeEngine.isArmed() && tradeManager.canEnter()) {
+            if (revengeEngine.onPrice(price, nowMs)) {
+                tradeManager.openRevenge(revengeEngine.side(), revengeEngine.lastEntryPrice(),
+                        Double.NaN, revengeEngine.lastAdverseExtreme());
+                return;
+            }
+            if (revengeEngine.pollExpired()) {
+                blackBox.log(nowMs, "REVENGE_WINDOW_EXPIRED");
+            }
         }
 
         ensureTarget(price);

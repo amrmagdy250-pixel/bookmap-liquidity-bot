@@ -26,7 +26,7 @@ public class RevengeEngine {
     private boolean active = false;
     private TradeSide side;
     private int sign;
-    private double stopX;         // x at the moment of the stop-out
+    private double entryX;        // x at the stopped trade's entry (start of the journey)
     private double adverseMinX;   // most adverse (lowest x) reached since the stop
     private long armedAt = 0;
     private int attemptsUsed = 0;
@@ -34,6 +34,7 @@ public class RevengeEngine {
     // Details of the most recent fire, for logging.
     private double lastEntryPrice = Double.NaN;
     private double lastAdverseExtreme = Double.NaN;
+    private boolean expiredPending = false;
 
     public RevengeEngine(Settings settings) {
         this.settings = settings;
@@ -44,7 +45,7 @@ public class RevengeEngine {
      * stopped trade (== the side toward the target wall); the recovery trade will
      * be taken on the same side.
      */
-    public void arm(TradeSide side, double stopPrice, long nowMs) {
+    public void arm(TradeSide side, double entryPrice, double stopPrice, long nowMs) {
         if (!settings.revengeEnabled || attemptsRemaining() <= 0) {
             this.active = false;
             return;
@@ -52,8 +53,8 @@ public class RevengeEngine {
         this.active = true;
         this.side = side;
         this.sign = side.sign;
-        this.stopX = sign * stopPrice;
-        this.adverseMinX = this.stopX;
+        this.entryX = sign * entryPrice;
+        this.adverseMinX = sign * stopPrice;
         this.armedAt = nowMs;
     }
 
@@ -83,6 +84,13 @@ public class RevengeEngine {
         return lastAdverseExtreme;
     }
 
+    /** True once, right after the search window lapses, so it can be logged. */
+    public boolean pollExpired() {
+        boolean e = expiredPending;
+        expiredPending = false;
+        return e;
+    }
+
     private int attemptsRemaining() {
         return Math.max(0, settings.revengeMaxAttempts - attemptsUsed);
     }
@@ -98,6 +106,7 @@ public class RevengeEngine {
         }
         if (nowMs - armedAt > settings.revengeWindowMs) {
             active = false; // window elapsed without a clean correction
+            expiredPending = true;
             return false;
         }
 
@@ -107,7 +116,11 @@ public class RevengeEngine {
             return false;
         }
 
-        double excursion = stopX - adverseMinX;        // how far beyond the stop it ran
+        // The adverse journey is measured from the stopped trade's ENTRY: the
+        // stop itself already sits deep inside that journey, so the engine is
+        // effective immediately even when the stop price turns out to be the
+        // extreme and price snaps straight back.
+        double excursion = entryX - adverseMinX;
         double correction = x - adverseMinX;            // how far it has turned back
         if (excursion < settings.revengeMinExcursionDollars) {
             return false; // not a real journey to correct from yet
