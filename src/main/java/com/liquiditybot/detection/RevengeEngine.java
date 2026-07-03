@@ -27,14 +27,25 @@ public class RevengeEngine {
     private TradeSide side;
     private int sign;
     private double entryX;        // x at the stopped trade's entry (start of the journey)
+    private double stopX;         // x at the stop, edge of the wall zone
     private double adverseMinX;   // most adverse (lowest x) reached since the stop
     private long armedAt = 0;
     private int attemptsUsed = 0;
+
+    // Higher-low confirmation: a first bounce alone can be a blip inside a
+    // waterfall. After the bounce we demand a pullback that HOLDS above the
+    // adverse extreme (a higher low) and a turn back up off that pullback
+    // before firing - that is what separates a correction from a falling market.
+    private boolean bounced = false;
+    private double bounceHighX;
+    private double pullbackLowX;
+    private boolean pullingBack = false;
 
     // Details of the most recent fire, for logging.
     private double lastEntryPrice = Double.NaN;
     private double lastAdverseExtreme = Double.NaN;
     private boolean expiredPending = false;
+    private String cancelPending = null;
 
     public RevengeEngine(Settings settings) {
         this.settings = settings;
@@ -54,8 +65,11 @@ public class RevengeEngine {
         this.side = side;
         this.sign = side.sign;
         this.entryX = sign * entryPrice;
+        this.stopX = sign * stopPrice;
         this.adverseMinX = sign * stopPrice;
         this.armedAt = nowMs;
+        this.bounced = false;
+        this.pullingBack = false;
     }
 
     /** Fully reset (e.g. after a genuine, non-stop trade closes). */
@@ -91,6 +105,18 @@ public class RevengeEngine {
         return e;
     }
 
+    /** Non-null once, right after the engine self-cancels, with the reason. */
+    public String pollCancelled() {
+        String c = cancelPending;
+        cancelPending = null;
+        return c;
+    }
+
+    /** External cancel (e.g. an opposite wall appeared): the chance is gone. */
+    public void cancel() {
+        this.active = false;
+    }
+
     private int attemptsRemaining() {
         return Math.max(0, settings.revengeMaxAttempts - attemptsUsed);
     }
@@ -113,6 +139,13 @@ public class RevengeEngine {
         double x = sign * price;
         if (x < adverseMinX) {
             adverseMinX = x; // the adverse move is still extending
+            bounced = false; // any bounce so far was just a blip in the move
+            pullingBack = false;
+            // Price left the wall zone entirely: the recovery chance is gone.
+            if (stopX - adverseMinX > settings.revengeMaxBeyondStopDollars) {
+                active = false;
+                cancelPending = "LEFT_ZONE";
+            }
             return false;
         }
 
@@ -125,9 +158,36 @@ public class RevengeEngine {
         if (excursion < settings.revengeMinExcursionDollars) {
             return false; // not a real journey to correct from yet
         }
-        if (correction < settings.revengeReversalDollars) {
-            return false; // not corrected enough to trust the turn
+
+        if (!bounced) {
+            if (correction < settings.revengeReversalDollars) {
+                return false; // not corrected enough to trust the turn
+            }
+            bounced = true;
+            bounceHighX = x;
+            pullingBack = false;
+            return false; // bounce noted; now wait for the higher low
         }
+
+        if (!pullingBack) {
+            if (x > bounceHighX) {
+                bounceHighX = x;
+            } else if (bounceHighX - x >= settings.revengeConfirmDollars) {
+                pullingBack = true; // pullback started; track its low
+                pullbackLowX = x;
+            }
+            return false;
+        }
+
+        if (x < pullbackLowX) {
+            pullbackLowX = x;
+            return false;
+        }
+        if (x - pullbackLowX < settings.revengeConfirmDollars) {
+            return false; // not turned back up off the pullback yet
+        }
+        // pullbackLowX > adverseMinX is guaranteed here (a new low below the
+        // extreme resets the whole sequence above), so this is a higher low.
 
         // Fire once.
         this.lastEntryPrice = price;

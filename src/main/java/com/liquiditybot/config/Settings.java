@@ -133,7 +133,7 @@ public class Settings {
      * peak is treated as an established extreme (good entry); a turn that pushes
      * more than this past it is a runaway breakout (skipped as risky).
      */
-    public double peakBreakoutToleranceDollars = 1.5;
+    public double peakBreakoutToleranceDollars = 0.5;
 
     // ---- Spoof-wall filter ---------------------------------------------------
 
@@ -171,6 +171,29 @@ public class Settings {
 
     /** Forget a previous entry's extreme after this long (ms). */
     public long reentryMemoryMs = 3600000;
+
+    /**
+     * After the first bounce, the pullback must hold above the adverse extreme
+     * (higher low) and price must turn back up off it by this much ($) before
+     * the recovery entry fires. This separates a genuine correction from a
+     * one-tick blip inside a still-falling market.
+     */
+    public double revengeConfirmDollars = 1.0;
+
+    /**
+     * If the adverse move runs this far ($) past the original stop, price has
+     * left the wall zone the trade was built around - the recovery chance is
+     * considered dead and the engine cancels itself (logged as LEFT_ZONE).
+     */
+    public double revengeMaxBeyondStopDollars = 5.0;
+
+    /**
+     * While waiting for the recovery, a confirmed wall on the opposite side
+     * (i.e. one whose magnet direction contradicts the revenge side) within
+     * targeting range means the market structure has flipped: cancel the
+     * recovery (logged as OPPOSITE_WALL).
+     */
+    public boolean revengeCancelOnOppositeWall = true;
 
     // ---- Revenge engine (post-stop recovery) --------------------------------
 

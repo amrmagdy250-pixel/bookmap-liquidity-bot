@@ -256,6 +256,21 @@ public class LiquidityWallStrategy implements
         // its adverse journey and is correcting back, take the recovery trade in
         // the same direction as the stopped trade before anything else.
         if (revengeEngine.isArmed() && tradeManager.canEnter()) {
+            // A confirmed wall whose magnet direction contradicts the revenge
+            // side means the market structure flipped: the recovery chance is gone.
+            if (settings.revengeCancelOnOppositeWall) {
+                for (LiquidityWall w : detector.allConfirmed()) {
+                    if (mapSide(w.side) != revengeEngine.side()
+                            && Math.abs(w.price - price) <= settings.maxWallDistanceDollars) {
+                        revengeEngine.cancel();
+                        blackBox.log(nowMs, "REVENGE_CANCELLED", "reason", "OPPOSITE_WALL",
+                                "wallId", w.id, "wallSide", w.side, "wallPrice", w.price);
+                        break;
+                    }
+                }
+            }
+        }
+        if (revengeEngine.isArmed() && tradeManager.canEnter()) {
             if (revengeEngine.onPrice(price, nowMs)) {
                 tradeManager.openRevenge(revengeEngine.side(), revengeEngine.lastEntryPrice(),
                         Double.NaN, revengeEngine.lastAdverseExtreme());
@@ -263,6 +278,10 @@ public class LiquidityWallStrategy implements
             }
             if (revengeEngine.pollExpired()) {
                 blackBox.log(nowMs, "REVENGE_WINDOW_EXPIRED");
+            }
+            String cancelled = revengeEngine.pollCancelled();
+            if (cancelled != null) {
+                blackBox.log(nowMs, "REVENGE_CANCELLED", "reason", cancelled);
             }
         }
 
@@ -586,6 +605,10 @@ public class LiquidityWallStrategy implements
                         v -> settings.revengeReversalDollars = v),
                 spinner("Revenge window (ms)", settings.revengeWindowMs, 0, 3600000, 1000,
                         v -> settings.revengeWindowMs = (long) v),
+                spinner("Revenge confirm ($)", settings.revengeConfirmDollars, 0.25, 100, 0.25,
+                        v -> settings.revengeConfirmDollars = v),
+                spinner("Revenge max beyond stop ($)", settings.revengeMaxBeyondStopDollars, 0.25, 1000, 0.25,
+                        v -> settings.revengeMaxBeyondStopDollars = v),
                 spinner("Spoof pull count", settings.spoofPullCount, 1, 20, 1,
                         v -> settings.spoofPullCount = (int) v),
                 spinner("Spoof window (ms)", settings.spoofWindowMs, 0, 3600000, 1000,
