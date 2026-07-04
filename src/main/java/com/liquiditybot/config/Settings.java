@@ -135,6 +135,21 @@ public class Settings {
      */
     public double peakBreakoutToleranceDollars = 0.5;
 
+    /**
+     * When no pivot history exists yet in the lookback window (session start,
+     * quiet stretches), allow the entry anyway instead of standing aside -
+     * but demand a stronger turn back toward the wall (see below) so quality
+     * is preserved without history to lean on.
+     */
+    public boolean peakNoHistoryEntryEnabled = true;
+
+    /**
+     * Extra turn confirmation ($, on top of the normal turn confirm) required
+     * for a no-history entry. The deeper turn substitutes for the missing
+     * established-extreme check.
+     */
+    public double peakNoHistoryExtraConfirmDollars = 1.0;
+
     // ---- Spoof-wall filter ---------------------------------------------------
 
     /**
@@ -153,6 +168,14 @@ public class Settings {
 
     /** Pulls within this many ticks of a level count as the same level. */
     public int spoofToleranceTicks = 5;
+
+    /**
+     * Walls at least this big are never treated as spoofed: a genuinely strong
+     * wall naturally breathes (contracts added and removed) and may flicker
+     * below the confirm threshold without being fake. Its pulls are not
+     * recorded and it is never blacklisted as a target.
+     */
+    public int spoofExemptWallSize = 100;
 
     // ---- Same-zone re-entry guard --------------------------------------------
 

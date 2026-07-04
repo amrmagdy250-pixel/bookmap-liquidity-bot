@@ -151,7 +151,7 @@ public class LiquidityWallStrategy implements
             public void onWallBroken(LiquidityWall wall, long now, String reason) {
                 blackBox.log(now, "WALL_BROKEN", "wallId", wall.id, "side", wall.side,
                         "price", wall.price, "peakSize", wall.peakSize, "reason", reason);
-                if ("pulled".equals(reason)) {
+                if ("pulled".equals(reason) && wall.peakSize < settings.spoofExemptWallSize) {
                     recordPull(wall.price, now);
                 }
             }
@@ -362,7 +362,8 @@ public class LiquidityWallStrategy implements
             if (tradesPerWall.getOrDefault(w.id, 0) >= settings.maxTradesPerWall) {
                 continue; // already traded this wall the maximum number of times
             }
-            if (settings.spoofFilterEnabled && isSuspectedSpoof(w.price)) {
+            if (settings.spoofFilterEnabled && w.size < settings.spoofExemptWallSize
+                    && isSuspectedSpoof(w.price)) {
                 if (spoofLoggedWalls.add(w.id)) {
                     blackBox.log(nowMs, "TARGET_SKIPPED_SPOOF", "wallId", w.id,
                             "side", w.side, "price", w.price, "size", w.size);
@@ -564,6 +565,13 @@ public class LiquidityWallStrategy implements
             persist();
         });
 
+        JCheckBox noHistoryBox = new JCheckBox("Allow entry with no peak history (extra confirm)",
+                settings.peakNoHistoryEntryEnabled);
+        noHistoryBox.addActionListener(e -> {
+            settings.peakNoHistoryEntryEnabled = noHistoryBox.isSelected();
+            persist();
+        });
+
         JCheckBox reentryBox = new JCheckBox("Re-entry needs deeper trough/peak on same wall",
                 settings.reentryDeeperExtremeEnabled);
         reentryBox.addActionListener(e -> {
@@ -576,6 +584,7 @@ public class LiquidityWallStrategy implements
         main.add(peakBox);
         main.add(revengeBox);
         main.add(spoofBox);
+        main.add(noHistoryBox);
         main.add(reentryBox);
         main.add(grid(
                 spinner("Take profit ($)", settings.takeProfitDollars, 0.25, 1000, 0.25,
@@ -606,6 +615,8 @@ public class LiquidityWallStrategy implements
                         v -> settings.peakBreakoutToleranceDollars = v),
                 spinner("Pivot reversal ($)", settings.pivotReversalDollars, 0.25, 100, 0.25,
                         v -> settings.pivotReversalDollars = v),
+                spinner("No-history extra confirm ($)", settings.peakNoHistoryExtraConfirmDollars, 0, 100, 0.25,
+                        v -> settings.peakNoHistoryExtraConfirmDollars = v),
                 spinner("Revenge max attempts", settings.revengeMaxAttempts, 0, 10, 1,
                         v -> settings.revengeMaxAttempts = (int) v),
                 spinner("Revenge min excursion ($)", settings.revengeMinExcursionDollars, 0, 1000, 0.5,
@@ -622,6 +633,8 @@ public class LiquidityWallStrategy implements
                         v -> settings.spoofPullCount = (int) v),
                 spinner("Spoof window (ms)", settings.spoofWindowMs, 0, 3600000, 1000,
                         v -> settings.spoofWindowMs = (long) v),
+                spinner("Spoof exempt wall size", settings.spoofExemptWallSize, 1, 100000, 1,
+                        v -> settings.spoofExemptWallSize = (int) v),
                 spinner("Re-entry advance ($)", settings.reentryMinExtremeAdvanceDollars, 0, 100, 0.25,
                         v -> settings.reentryMinExtremeAdvanceDollars = v),
                 spinner("Re-entry cooldown (ms)", settings.reentryCooldownMs, 0, 3600000, 60000,

@@ -146,27 +146,38 @@ public class WaveTracker {
 
         if (settings.peakFilterEnabled) {
             if (Double.isNaN(recentExtreme)) {
-                // Sniper mode needs history to judge the turn: no confirmed
-                // pivots in the lookback window means we cannot tell an
-                // established extreme from a runaway move -> stand aside.
-                fired = true;
-                lastSkipReason = "NO_PEAK_HISTORY";
-                lastSkipPeak = peakPrice;
-                lastSkipExtreme = Double.NaN;
-                return null;
-            }
-            // A runaway breakout means this peak pushed past every comparable
-            // recent extreme by more than the tolerance (short: a new high; long:
-            // a new low). That is momentum against us -> skip.
-            // Away-from-wall is the decreasing-x direction, so the peak is more
-            // extreme than the reference when its x is LOWER: sign*(extreme-peak).
-            double breakout = sign * (recentExtreme - peakPrice); // >0 => new, more-extreme peak
-            if (breakout > settings.peakBreakoutToleranceDollars) {
-                fired = true; // don't re-fire on this same trough
-                lastSkipReason = "BREAKOUT_PEAK";
-                lastSkipPeak = peakPrice;
-                lastSkipExtreme = recentExtreme;
-                return null;
+                // No confirmed pivots in the lookback window: we cannot tell an
+                // established extreme from a runaway move. Either stand aside,
+                // or (when allowed) demand a deeper turn back toward the wall
+                // as a substitute for the missing history.
+                if (!settings.peakNoHistoryEntryEnabled) {
+                    fired = true;
+                    lastSkipReason = "NO_PEAK_HISTORY";
+                    lastSkipPeak = peakPrice;
+                    lastSkipExtreme = Double.NaN;
+                    return null;
+                }
+                boolean strongTurn = x >= troughX + sign0(settings.turnConfirmDollars
+                        + settings.peakNoHistoryExtraConfirmDollars);
+                if (!strongTurn) {
+                    // Not fired: keep watching this trough until the deeper
+                    // turn confirms (or a deeper trough resets the leg).
+                    return null;
+                }
+            } else {
+                // A runaway breakout means this peak pushed past every comparable
+                // recent extreme by more than the tolerance (short: a new high; long:
+                // a new low). That is momentum against us -> skip.
+                // Away-from-wall is the decreasing-x direction, so the peak is more
+                // extreme than the reference when its x is LOWER: sign*(extreme-peak).
+                double breakout = sign * (recentExtreme - peakPrice); // >0 => new, more-extreme peak
+                if (breakout > settings.peakBreakoutToleranceDollars) {
+                    fired = true; // don't re-fire on this same trough
+                    lastSkipReason = "BREAKOUT_PEAK";
+                    lastSkipPeak = peakPrice;
+                    lastSkipExtreme = recentExtreme;
+                    return null;
+                }
             }
         }
 
