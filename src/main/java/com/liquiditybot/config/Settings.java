@@ -106,6 +106,15 @@ public class Settings {
     /** Price must turn back toward the wall by this much to confirm the entry. */
     public double turnConfirmDollars = 1.0;
 
+    /**
+     * Re-targeting a wall on the same side within this many dollars of the
+     * previous target resumes the wave state instead of resetting it. A big
+     * wall whose size breathes around the confirm threshold flickers
+     * broken/re-confirmed; without this the accumulated pull-back would be
+     * erased on every flicker and the entry could never fire.
+     */
+    public double waveResumeToleranceDollars = 1.0;
+
     // ---- Smart peak filter ("sniper") ---------------------------------------
 
     /**

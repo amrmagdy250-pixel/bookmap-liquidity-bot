@@ -611,6 +611,8 @@ public class LiquidityWallStrategy implements
                         v -> settings.maxEntryDistanceFromWallDollars = v),
                 spinner("Turn confirm ($)", settings.turnConfirmDollars, 0, 100, 0.25,
                         v -> settings.turnConfirmDollars = v),
+                spinner("Wave resume tol ($)", settings.waveResumeToleranceDollars, 0, 100, 0.25,
+                        v -> settings.waveResumeToleranceDollars = v),
                 spinner("Peak breakout tol ($)", settings.peakBreakoutToleranceDollars, 0, 100, 0.25,
                         v -> settings.peakBreakoutToleranceDollars = v),
                 spinner("Pivot reversal ($)", settings.pivotReversalDollars, 0.25, 100, 0.25,

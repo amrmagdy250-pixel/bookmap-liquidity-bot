@@ -76,12 +76,25 @@ public class WaveTracker {
         this.swings = swings;
     }
 
-    /** Start (or restart) watching a wall. */
+    /**
+     * Start (or restart) watching a wall. If the new target is effectively the
+     * same wall as the one we were just tracking (same side, near-same price),
+     * the wave state is resumed instead of reset - a wall that flickers
+     * broken/re-confirmed (its size breathing around the threshold) must not
+     * keep erasing the pull-back progress accumulated toward it.
+     */
     public void arm(TradeSide side, double wallPrice, double currentPrice) {
+        double newWallX = side.sign * wallPrice;
+        if (this.side == side
+                && Math.abs(this.wallX - newWallX) <= settings.waveResumeToleranceDollars) {
+            this.wallX = newWallX;
+            this.active = true;
+            return;
+        }
         this.active = true;
         this.side = side;
         this.sign = side.sign;
-        this.wallX = sign * wallPrice;
+        this.wallX = newWallX;
         double x = sign * currentPrice;
         this.swingMaxX = x;
         this.troughX = x;
