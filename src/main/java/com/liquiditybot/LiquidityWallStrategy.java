@@ -208,6 +208,7 @@ public class LiquidityWallStrategy implements
 
         blackBox.log(nowMs, "INIT", "alias", alias, "pips", pips, "multiplier", info.multiplier,
                 "enableTrading", settings.enableTrading, "magnetMode", settings.magnetMode,
+                "wallStrategyEnabled", settings.wallStrategyEnabled,
                 "takeProfit", settings.takeProfitDollars, "stopLoss", settings.stopLossDollars,
                 "wallMinSize", settings.wallMinSize, "waveMinAmplitude", settings.waveMinAmplitudeDollars);
         blackBox.log(nowMs, "SETTINGS",
@@ -324,7 +325,7 @@ public class LiquidityWallStrategy implements
         }
         lastDetectMs = nowMs;
         detector.detect(book, mid, nowMs);
-        if (tradeManager.isFlat()) {
+        if (settings.wallStrategyEnabled && tradeManager.isFlat()) {
             ensureTarget(mid);
         }
     }
@@ -347,7 +348,7 @@ public class LiquidityWallStrategy implements
 
         drawTradeLines();
 
-        if (!tradeManager.isFlat()) {
+        if (!settings.wallStrategyEnabled || !tradeManager.isFlat()) {
             return;
         }
 
@@ -648,6 +649,14 @@ public class LiquidityWallStrategy implements
             persist();
         });
 
+        JCheckBox wallStrategyBox = new JCheckBox(
+                "Wall strategy (uncheck to test the OB engine alone)",
+                settings.wallStrategyEnabled);
+        wallStrategyBox.addActionListener(e -> {
+            settings.wallStrategyEnabled = wallStrategyBox.isSelected();
+            persist();
+        });
+
         JCheckBox peakBox = new JCheckBox("Smart peak filter (skip runaway breakout entries)",
                 settings.peakFilterEnabled);
         peakBox.addActionListener(e -> {
@@ -684,6 +693,7 @@ public class LiquidityWallStrategy implements
         });
 
         main.add(tradingBox);
+        main.add(wallStrategyBox);
         main.add(magnetBox);
         main.add(peakBox);
         main.add(revengeBox);

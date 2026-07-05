@@ -32,6 +32,13 @@ public class Settings {
      */
     public boolean magnetMode = true;
 
+    /**
+     * Master switch for the wall/wave (liquidity) strategy. When off, no wall
+     * targets are taken and no wall/revenge trades fire - the OB engine (which
+     * has its own switch) can then be tested in isolation, or vice versa.
+     */
+    public boolean wallStrategyEnabled = true;
+
     public boolean drawWallsOnChart = true;
 
     // ---- Wall detection ------------------------------------------------------
