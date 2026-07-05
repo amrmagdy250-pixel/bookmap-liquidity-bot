@@ -3,6 +3,7 @@ package com.liquiditybot.trade;
 import com.liquiditybot.blackbox.BlackBox;
 import com.liquiditybot.config.Settings;
 import com.liquiditybot.detection.OrderBlockEngine;
+import com.liquiditybot.indicators.StatsIndicators;
 
 import velox.api.layer1.data.SimpleOrderSendParametersBuilder;
 import velox.api.layer1.simplified.Api;
@@ -23,6 +24,7 @@ public class ObTradeManager {
     private final String alias;
     private final Settings settings;
     private final BlackBox blackBox;
+    private final StatsIndicators stats;
     private final double multiplier;
 
     private boolean open = false;
@@ -33,7 +35,9 @@ public class ObTradeManager {
     private double entryPrice;
     private double tpPrice;
     private double slPrice;
+    private long entryTime;
     private long blockId;
+    private double blockCenter;
 
     private int wins = 0;
     private int losses = 0;
@@ -42,11 +46,12 @@ public class ObTradeManager {
     private long nowMs = 0;
 
     public ObTradeManager(Api api, String alias, Settings settings, BlackBox blackBox,
-                          double multiplier) {
+                          StatsIndicators stats, double multiplier) {
         this.api = api;
         this.alias = alias;
         this.settings = settings;
         this.blackBox = blackBox;
+        this.stats = stats;
         this.multiplier = multiplier;
     }
 
@@ -82,6 +87,8 @@ public class ObTradeManager {
         this.currentTradeId = ++tradeSeq;
         this.side = block.side;
         this.blockId = block.id;
+        this.blockCenter = block.center();
+        this.entryTime = nowMs;
         this.entryPrice = price;
         if (side == TradeSide.LONG) {
             this.tpPrice = price + settings.obTakeProfitDollars;
@@ -145,6 +152,12 @@ public class ObTradeManager {
             losses++;
         }
         netPnlDollars += pnlDollars;
+
+        // OB trades count into the same dashboard dials as the wall strategy:
+        // one shared wins/losses/win-rate/net-P&L for both engines.
+        stats.recordTrade(new TradeRecord(currentTradeId, side, entryPrice, exitPrice,
+                entryTime, nowMs, blockCenter, pnlPrice, pnlDollars, pnlPrice > 0,
+                reason, shadow), nowMs);
 
         blackBox.log(nowMs, "OB_TRADE_CLOSED",
                 "obTradeId", currentTradeId,

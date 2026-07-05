@@ -98,9 +98,6 @@ public class LiquidityWallStrategy implements
     private Indicator entryLineIndicator;
     private Indicator tpLineIndicator;
     private Indicator slLineIndicator;
-    private Indicator obEntryLineIndicator;
-    private Indicator obTpLineIndicator;
-    private Indicator obSlLineIndicator;
 
     private long nowMs = 0;
     private long lastDetectMs = 0;
@@ -149,7 +146,8 @@ public class LiquidityWallStrategy implements
         });
         // Order-block engine: fully independent module with its own trade manager.
         this.obEngine = new OrderBlockEngine(settings, pips);
-        this.obTradeManager = new ObTradeManager(api, alias, settings, blackBox, info.multiplier);
+        this.obTradeManager = new ObTradeManager(api, alias, settings, blackBox, stats,
+                info.multiplier);
         this.obEngine.setListener(new OrderBlockEngine.Listener() {
             @Override
             public void onBlockConfirmed(OrderBlockEngine.Block b, long now) {
@@ -195,16 +193,6 @@ public class LiquidityWallStrategy implements
         this.slLineIndicator = api.registerIndicator("Stop loss", GraphType.PRIMARY);
         this.slLineIndicator.setColor(new Color(220, 70, 70));
         this.slLineIndicator.setWidth(2);
-
-        this.obEntryLineIndicator = api.registerIndicator("OB entry", GraphType.PRIMARY);
-        this.obEntryLineIndicator.setColor(new Color(180, 130, 255));
-        this.obEntryLineIndicator.setWidth(2);
-        this.obTpLineIndicator = api.registerIndicator("OB take profit", GraphType.PRIMARY);
-        this.obTpLineIndicator.setColor(new Color(120, 220, 200));
-        this.obTpLineIndicator.setWidth(2);
-        this.obSlLineIndicator = api.registerIndicator("OB stop loss", GraphType.PRIMARY);
-        this.obSlLineIndicator.setColor(new Color(255, 120, 180));
-        this.obSlLineIndicator.setWidth(2);
 
         blackBox.log(nowMs, "INIT", "alias", alias, "pips", pips, "multiplier", info.multiplier,
                 "enableTrading", settings.enableTrading, "magnetMode", settings.magnetMode,
@@ -432,11 +420,12 @@ public class LiquidityWallStrategy implements
             entryLineIndicator.addPoint(tradeManager.getEntryPrice() / pips);
             tpLineIndicator.addPoint(tradeManager.getTakeProfitPrice() / pips);
             slLineIndicator.addPoint(tradeManager.getStopLossPrice() / pips);
-        }
-        if (obTradeManager.isOpen()) {
-            obEntryLineIndicator.addPoint(obTradeManager.getEntryPrice() / pips);
-            obTpLineIndicator.addPoint(obTradeManager.getTakeProfitPrice() / pips);
-            obSlLineIndicator.addPoint(obTradeManager.getStopLossPrice() / pips);
+        } else if (obTradeManager.isOpen()) {
+            // Shared lines: an OB trade draws on the same entry/TP/SL lines
+            // (the wall trade takes priority when both are open).
+            entryLineIndicator.addPoint(obTradeManager.getEntryPrice() / pips);
+            tpLineIndicator.addPoint(obTradeManager.getTakeProfitPrice() / pips);
+            slLineIndicator.addPoint(obTradeManager.getStopLossPrice() / pips);
         }
     }
 
