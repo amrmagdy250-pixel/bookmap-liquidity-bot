@@ -72,6 +72,9 @@ public class OrderBlockEngine {
 
     /** Listener for diagnostics (block lifecycle events). */
     public interface Listener {
+        void onZoneCandidate(Block b, long now);
+        void onZoneRejected(double low, double high, double volume, double delta,
+                            String reason, long now);
         void onBlockConfirmed(Block b, long now);
         void onBlockDead(Block b, long now, String reason);
     }
@@ -98,6 +101,11 @@ public class OrderBlockEngine {
     private final List<Block> blocks = new ArrayList<>();
     private long blockSeq = 0;
     private long lastZoneScanMs = 0;
+
+    // Rejection log dedupe: last rejected level and when, so a zone failing the
+    // same check on every scan is reported once per window instead of spamming.
+    private long lastRejectLevel = Long.MIN_VALUE;
+    private long lastRejectMs = 0;
 
     public OrderBlockEngine(Settings settings, double pips) {
         this.settings = settings;
@@ -245,11 +253,13 @@ public class OrderBlockEngine {
         if (bestVol < settings.obMinZoneVolume) {
             return;
         }
-        if (Math.abs(bestDelta) < bestVol * settings.obMinDeltaRatio) {
-            return; // volume heavy but two-sided: absorption fight, not a clean block
-        }
         double low = (bestLevel - settings.obZoneTicks) * pips;
         double high = (bestLevel + settings.obZoneTicks) * pips;
+        if (Math.abs(bestDelta) < bestVol * settings.obMinDeltaRatio) {
+            // Volume heavy but two-sided: absorption fight, not a clean block.
+            rejectOnce(bestLevel, low, high, bestVol, bestDelta, "DELTA_TWO_SIDED", nowMs);
+            return;
+        }
 
         // Don't stack duplicates on the same area.
         for (Block b : blocks) {
@@ -260,13 +270,30 @@ public class OrderBlockEngine {
         if (blocks.size() >= settings.obMaxActiveBlocks) {
             return;
         }
-        blocks.add(new Block(++blockSeq, low, high, bestVol, bestDelta, nowMs));
+        Block b = new Block(++blockSeq, low, high, bestVol, bestDelta, nowMs);
+        blocks.add(b);
+        if (listener != null) {
+            listener.onZoneCandidate(b, nowMs);
+        }
         // The forming tape is consumed so the same prints don't build a second zone.
         recentExecs.clear();
     }
 
+    private void rejectOnce(long level, double low, double high, double volume, double delta,
+                            String reason, long nowMs) {
+        if (listener == null) {
+            return;
+        }
+        if (level == lastRejectLevel && nowMs - lastRejectMs < settings.obZoneWindowMs) {
+            return;
+        }
+        lastRejectLevel = level;
+        lastRejectMs = nowMs;
+        listener.onZoneRejected(low, high, volume, delta, reason, nowMs);
+    }
+
     private void notifyDead(Block b, long nowMs, String reason) {
-        if (listener != null && b.confirmed) {
+        if (listener != null) {
             listener.onBlockDead(b, nowMs, reason);
         }
     }

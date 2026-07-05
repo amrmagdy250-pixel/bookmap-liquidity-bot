@@ -150,6 +150,19 @@ public class LiquidityWallStrategy implements
                 info.multiplier);
         this.obEngine.setListener(new OrderBlockEngine.Listener() {
             @Override
+            public void onZoneCandidate(OrderBlockEngine.Block b, long now) {
+                blackBox.log(now, "OB_ZONE_CANDIDATE", "blockId", b.id,
+                        "low", b.low, "high", b.high, "volume", b.volume, "delta", b.delta);
+            }
+
+            @Override
+            public void onZoneRejected(double low, double high, double volume, double delta,
+                                       String reason, long now) {
+                blackBox.log(now, "OB_ZONE_REJECTED", "low", low, "high", high,
+                        "volume", volume, "delta", delta, "reason", reason);
+            }
+
+            @Override
             public void onBlockConfirmed(OrderBlockEngine.Block b, long now) {
                 blackBox.log(now, "OB_BLOCK_CONFIRMED", "blockId", b.id, "side", b.side,
                         "low", b.low, "high", b.high, "volume", b.volume, "delta", b.delta);
