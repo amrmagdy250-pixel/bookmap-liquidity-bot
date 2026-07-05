@@ -18,11 +18,13 @@ import com.liquiditybot.blackbox.BlackBox;
 import com.liquiditybot.book.LiquidityWall;
 import com.liquiditybot.book.OrderBook;
 import com.liquiditybot.config.Settings;
+import com.liquiditybot.detection.OrderBlockEngine;
 import com.liquiditybot.detection.RevengeEngine;
 import com.liquiditybot.detection.SwingMemory;
 import com.liquiditybot.detection.WallDetector;
 import com.liquiditybot.detection.WaveTracker;
 import com.liquiditybot.indicators.StatsIndicators;
+import com.liquiditybot.trade.ObTradeManager;
 import com.liquiditybot.trade.TradeManager;
 import com.liquiditybot.trade.TradeSide;
 
@@ -89,11 +91,16 @@ public class LiquidityWallStrategy implements
     private WaveTracker waveTracker;
     private RevengeEngine revengeEngine;
     private TradeManager tradeManager;
+    private OrderBlockEngine obEngine;
+    private ObTradeManager obTradeManager;
     private StatsIndicators stats;
     private Indicator activeWallIndicator;
     private Indicator entryLineIndicator;
     private Indicator tpLineIndicator;
     private Indicator slLineIndicator;
+    private Indicator obEntryLineIndicator;
+    private Indicator obTpLineIndicator;
+    private Indicator obSlLineIndicator;
 
     private long nowMs = 0;
     private long lastDetectMs = 0;
@@ -140,6 +147,22 @@ public class LiquidityWallStrategy implements
                 revengeEngine.reset(); // took profit (or any non-stop exit): stand down
             }
         });
+        // Order-block engine: fully independent module with its own trade manager.
+        this.obEngine = new OrderBlockEngine(settings, pips);
+        this.obTradeManager = new ObTradeManager(api, alias, settings, blackBox, info.multiplier);
+        this.obEngine.setListener(new OrderBlockEngine.Listener() {
+            @Override
+            public void onBlockConfirmed(OrderBlockEngine.Block b, long now) {
+                blackBox.log(now, "OB_BLOCK_CONFIRMED", "blockId", b.id, "side", b.side,
+                        "low", b.low, "high", b.high, "volume", b.volume, "delta", b.delta);
+            }
+
+            @Override
+            public void onBlockDead(OrderBlockEngine.Block b, long now, String reason) {
+                blackBox.log(now, "OB_BLOCK_DEAD", "blockId", b.id, "side", b.side,
+                        "low", b.low, "high", b.high, "reason", reason);
+            }
+        });
         this.detector = new WallDetector(settings, pips, new WallDetector.Listener() {
             @Override
             public void onWallConfirmed(LiquidityWall wall, long now) {
@@ -172,6 +195,16 @@ public class LiquidityWallStrategy implements
         this.slLineIndicator = api.registerIndicator("Stop loss", GraphType.PRIMARY);
         this.slLineIndicator.setColor(new Color(220, 70, 70));
         this.slLineIndicator.setWidth(2);
+
+        this.obEntryLineIndicator = api.registerIndicator("OB entry", GraphType.PRIMARY);
+        this.obEntryLineIndicator.setColor(new Color(180, 130, 255));
+        this.obEntryLineIndicator.setWidth(2);
+        this.obTpLineIndicator = api.registerIndicator("OB take profit", GraphType.PRIMARY);
+        this.obTpLineIndicator.setColor(new Color(120, 220, 200));
+        this.obTpLineIndicator.setWidth(2);
+        this.obSlLineIndicator = api.registerIndicator("OB stop loss", GraphType.PRIMARY);
+        this.obSlLineIndicator.setColor(new Color(255, 120, 180));
+        this.obSlLineIndicator.setWidth(2);
 
         blackBox.log(nowMs, "INIT", "alias", alias, "pips", pips, "multiplier", info.multiplier,
                 "enableTrading", settings.enableTrading, "magnetMode", settings.magnetMode,
@@ -215,6 +248,23 @@ public class LiquidityWallStrategy implements
                 "revengeMaxBeyondStop", settings.revengeMaxBeyondStopDollars,
                 "revengeCancelOnOppositeWall", settings.revengeCancelOnOppositeWall,
                 "cooldownMsAfterTrade", settings.cooldownMsAfterTrade);
+        blackBox.log(nowMs, "OB_SETTINGS",
+                "obEnabled", settings.obEnabled,
+                "obMinZoneVolume", settings.obMinZoneVolume,
+                "obZoneTicks", settings.obZoneTicks,
+                "obZoneWindowMs", settings.obZoneWindowMs,
+                "obMinDeltaRatio", settings.obMinDeltaRatio,
+                "obDisplacement", settings.obDisplacementDollars,
+                "obDisplacementWindowMs", settings.obDisplacementWindowMs,
+                "obMaxAgeMs", settings.obMaxAgeMs,
+                "obEntryTolerance", settings.obEntryToleranceDollars,
+                "obInvalidation", settings.obInvalidationDollars,
+                "obMaxTradesPerBlock", settings.obMaxTradesPerBlock,
+                "obMaxActiveBlocks", settings.obMaxActiveBlocks,
+                "obOrderSize", settings.obOrderSize,
+                "obTakeProfit", settings.obTakeProfitDollars,
+                "obStopLoss", settings.obStopLossDollars,
+                "obCooldownMs", settings.obCooldownMs);
         Log.info("[LiquidityWallBot] initialized on " + alias + " (trading="
                 + settings.enableTrading + ", blackbox=" + blackBox.getJsonPath() + ")");
     }
@@ -260,6 +310,7 @@ public class LiquidityWallStrategy implements
         stats.onTrade(size, tradeInfo.isBidAggressor);
         // Bookmap reports prices as tick indices; convert to real price units so
         // trade prices match the wall/BBO prices used everywhere else.
+        obEngine.onExecution(price * pips, size, tradeInfo.isBidAggressor, nowMs);
         onPriceUpdate(price * pips);
     }
 
@@ -283,6 +334,16 @@ public class LiquidityWallStrategy implements
         tradeManager.setNow(nowMs);
         tradeManager.onPrice(price);
         swings.onPrice(price, nowMs);
+
+        // Order-block engine: runs in parallel, holds its own position, and never
+        // interacts with the wall/wave path below.
+        obTradeManager.setNow(nowMs);
+        obTradeManager.onPrice(price);
+        OrderBlockEngine.EntrySignal obSig = obEngine.onPrice(price, nowMs);
+        if (obSig != null && obTradeManager.canEnter()
+                && obTradeManager.openTrade(obSig.block, obSig.price)) {
+            obEngine.markTraded(obSig.block);
+        }
 
         drawTradeLines();
 
@@ -370,6 +431,11 @@ public class LiquidityWallStrategy implements
             entryLineIndicator.addPoint(tradeManager.getEntryPrice() / pips);
             tpLineIndicator.addPoint(tradeManager.getTakeProfitPrice() / pips);
             slLineIndicator.addPoint(tradeManager.getStopLossPrice() / pips);
+        }
+        if (obTradeManager.isOpen()) {
+            obEntryLineIndicator.addPoint(obTradeManager.getEntryPrice() / pips);
+            obTpLineIndicator.addPoint(obTradeManager.getTakeProfitPrice() / pips);
+            obSlLineIndicator.addPoint(obTradeManager.getStopLossPrice() / pips);
         }
     }
 
@@ -688,7 +754,53 @@ public class LiquidityWallStrategy implements
         reload.addActionListener(e -> api.reload());
         main.add(reload);
 
-        return new StrategyPanel[] {main};
+        StrategyPanel ob = new StrategyPanel("OB (Order Block engine)");
+        ob.setLayout(new BoxLayout(ob, BoxLayout.Y_AXIS));
+
+        JCheckBox obBox = new JCheckBox("OB engine (independent order-block trading)",
+                settings.obEnabled);
+        obBox.addActionListener(e -> {
+            settings.obEnabled = obBox.isSelected();
+            persist();
+        });
+        ob.add(obBox);
+        ob.add(grid(
+                spinner("OB min zone volume", settings.obMinZoneVolume, 1, 1000000, 10,
+                        v -> settings.obMinZoneVolume = (int) v),
+                spinner("OB zone half-width (ticks)", settings.obZoneTicks, 1, 500, 1,
+                        v -> settings.obZoneTicks = (int) v),
+                spinner("OB zone window (ms)", settings.obZoneWindowMs, 1000, 3600000, 5000,
+                        v -> settings.obZoneWindowMs = (long) v),
+                spinner("OB min delta ratio", settings.obMinDeltaRatio, 0, 1, 0.05,
+                        v -> settings.obMinDeltaRatio = v),
+                spinner("OB displacement ($)", settings.obDisplacementDollars, 0.25, 1000, 0.25,
+                        v -> settings.obDisplacementDollars = v),
+                spinner("OB displacement window (ms)", settings.obDisplacementWindowMs, 1000, 3600000, 10000,
+                        v -> settings.obDisplacementWindowMs = (long) v),
+                spinner("OB block max age (ms)", settings.obMaxAgeMs, 60000, 86400000, 60000,
+                        v -> settings.obMaxAgeMs = (long) v),
+                spinner("OB entry tolerance ($)", settings.obEntryToleranceDollars, 0, 100, 0.25,
+                        v -> settings.obEntryToleranceDollars = v),
+                spinner("OB invalidation ($)", settings.obInvalidationDollars, 0, 100, 0.25,
+                        v -> settings.obInvalidationDollars = v),
+                spinner("OB max trades per block", settings.obMaxTradesPerBlock, 1, 100, 1,
+                        v -> settings.obMaxTradesPerBlock = (int) v),
+                spinner("OB max active blocks", settings.obMaxActiveBlocks, 1, 100, 1,
+                        v -> settings.obMaxActiveBlocks = (int) v),
+                spinner("OB order size", settings.obOrderSize, 1, 1000, 1,
+                        v -> settings.obOrderSize = (int) v),
+                spinner("OB take profit ($)", settings.obTakeProfitDollars, 0.25, 1000, 0.25,
+                        v -> settings.obTakeProfitDollars = v),
+                spinner("OB stop loss ($)", settings.obStopLossDollars, 0.25, 1000, 0.25,
+                        v -> settings.obStopLossDollars = v),
+                spinner("OB cooldown (ms)", settings.obCooldownMs, 0, 3600000, 5000,
+                        v -> settings.obCooldownMs = (long) v)));
+
+        JButton obReload = new JButton("Apply & reload");
+        obReload.addActionListener(e -> api.reload());
+        ob.add(obReload);
+
+        return new StrategyPanel[] {main, ob};
     }
 
     private void persist() {

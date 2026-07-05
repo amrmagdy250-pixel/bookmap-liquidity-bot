@@ -267,6 +267,69 @@ public class Settings {
     /** Give up looking for a recovery this long (ms) after the stop-out. */
     public long revengeWindowMs = 1200000;
 
+    // ---- Order-block engine (independent module) ------------------------------
+
+    /**
+     * A completely independent engine that trades order blocks found from the
+     * raw executed tape: a narrow zone that absorbs a large executed volume with
+     * a one-sided aggressor delta, followed by an impulsive displacement away.
+     * When price revisits the zone, it enters in the displacement direction.
+     * It runs in parallel with the wall/wave strategy and holds its own
+     * position with its own TP/SL - either engine can be switched on or off
+     * without affecting the other.
+     */
+    public boolean obEnabled = true;
+
+    /** Minimum executed contracts inside the zone window to qualify as a block. */
+    public int obMinZoneVolume = 150;
+
+    /** Zone half-width in ticks (the block spans +/- this many ticks). */
+    public int obZoneTicks = 10;
+
+    /** The zone volume must accumulate within this window (ms). */
+    public long obZoneWindowMs = 60000;
+
+    /**
+     * The aggressor delta inside the zone must be at least this fraction of the
+     * total volume (one-sided flow). Below it the zone is a two-sided fight,
+     * not a clean institutional block.
+     */
+    public double obMinDeltaRatio = 0.3;
+
+    /** Price must leave the zone by at least this ($) to confirm the block. */
+    public double obDisplacementDollars = 5.0;
+
+    /** The displacement must happen within this long (ms) after the zone forms. */
+    public long obDisplacementWindowMs = 300000;
+
+    /** Confirmed blocks older than this (ms) are forgotten. */
+    public long obMaxAgeMs = 3600000;
+
+    /** Revisit entry triggers within this ($) of the zone edge. */
+    public double obEntryToleranceDollars = 0.5;
+
+    /** Price through the far side of the block by this ($) invalidates it. */
+    public double obInvalidationDollars = 2.0;
+
+    /** Maximum trades taken off a single block. */
+    public int obMaxTradesPerBlock = 1;
+
+    /** Maximum blocks tracked at once. */
+    public int obMaxActiveBlocks = 10;
+
+    /** How often (ms) the recent tape is scanned for a new zone. */
+    public long obScanThrottleMs = 2000;
+
+    /** OB trade sizing and targets, independent of the main strategy's. */
+    public int obOrderSize = 1;
+
+    public double obTakeProfitDollars = 4.0;
+
+    public double obStopLossDollars = 8.0;
+
+    /** Cool-down after an OB trade closes before another OB trade may open. */
+    public long obCooldownMs = 60000;
+
     // ---- Pacing --------------------------------------------------------------
 
     /** Cool-down after a trade closes before another may open. */
