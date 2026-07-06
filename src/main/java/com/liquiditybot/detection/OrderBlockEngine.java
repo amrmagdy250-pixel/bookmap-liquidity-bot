@@ -44,7 +44,9 @@ public class OrderBlockEngine {
         public TradeSide side;          // set at confirmation (LONG = bullish block)
         public boolean confirmed = false;
         public boolean leftZone = false; // price moved away after confirmation
+        public boolean reconfirm = false; // formed on a recently violated level
         public int tradesTaken = 0;
+        long lastFastSkipMs = 0;
 
         Block(long id, double low, double high, double volume, double delta, long formedAt) {
             this.id = id;
@@ -77,6 +79,7 @@ public class OrderBlockEngine {
                             String reason, long now);
         void onBlockConfirmed(Block b, long now);
         void onBlockDead(Block b, long now, String reason);
+        void onEntrySkipped(Block b, double price, double approachMove, long now);
     }
 
     private static final class Exec {
@@ -106,6 +109,13 @@ public class OrderBlockEngine {
     // same check on every scan is reported once per window instead of spamming.
     private long lastRejectLevel = Long.MIN_VALUE;
     private long lastRejectMs = 0;
+
+    // Approach-speed filter: recent price path used to measure how fast price
+    // came into a zone.
+    private final ArrayDeque<double[]> pricePath = new ArrayDeque<>(); // {price, time}
+
+    // Re-confirmation memory: violated block areas as {low, high, expiry}.
+    private final List<double[]> penalizedAreas = new ArrayList<>();
 
     public OrderBlockEngine(Settings settings, double pips) {
         this.settings = settings;
@@ -144,6 +154,7 @@ public class OrderBlockEngine {
         if (!settings.obEnabled) {
             return null;
         }
+        recordPricePath(price, nowMs);
         EntrySignal signal = null;
         Iterator<Block> it = blocks.iterator();
         while (it.hasNext()) {
@@ -162,8 +173,13 @@ public class OrderBlockEngine {
                     it.remove();
                     continue;
                 }
-                boolean up = price >= b.high + settings.obDisplacementDollars;
-                boolean down = price <= b.low - settings.obDisplacementDollars;
+                // A block on a recently violated level must prove itself with a
+                // bigger displacement (flexible re-confirmation, not a ban).
+                double disp = b.reconfirm
+                        ? settings.obDisplacementDollars * settings.obReconfirmDisplacementMult
+                        : settings.obDisplacementDollars;
+                boolean up = price >= b.high + disp;
+                boolean down = price <= b.low - disp;
                 if (up && b.delta > 0) {
                     b.side = TradeSide.LONG;
                     b.confirmed = true;
@@ -191,6 +207,7 @@ public class OrderBlockEngine {
                     ? price < b.low - settings.obInvalidationDollars
                     : price > b.high + settings.obInvalidationDollars;
             if (violated) {
+                penalize(b, nowMs);
                 notifyDead(b, nowMs, "VIOLATED");
                 it.remove();
                 continue;
@@ -204,6 +221,13 @@ public class OrderBlockEngine {
             boolean inside = price >= b.low - settings.obEntryToleranceDollars
                     && price <= b.high + settings.obEntryToleranceDollars;
             if (b.leftZone && inside && signal == null) {
+                if (isFastApproach(b, price, nowMs)) {
+                    if (listener != null && nowMs - b.lastFastSkipMs >= settings.obApproachWindowMs) {
+                        b.lastFastSkipMs = nowMs;
+                        listener.onEntrySkipped(b, price, approachMove(nowMs), nowMs);
+                    }
+                    continue;
+                }
                 signal = new EntrySignal(b, price);
             }
         }
@@ -255,9 +279,12 @@ public class OrderBlockEngine {
         }
         double low = (bestLevel - settings.obZoneTicks) * pips;
         double high = (bestLevel + settings.obZoneTicks) * pips;
-        if (Math.abs(bestDelta) < bestVol * settings.obMinDeltaRatio) {
+        boolean reconfirm = settings.obReconfirmEnabled && isPenalized(low, high, nowMs);
+        double minRatio = reconfirm ? settings.obReconfirmDeltaRatio : settings.obMinDeltaRatio;
+        if (Math.abs(bestDelta) < bestVol * minRatio) {
             // Volume heavy but two-sided: absorption fight, not a clean block.
-            rejectOnce(bestLevel, low, high, bestVol, bestDelta, "DELTA_TWO_SIDED", nowMs);
+            rejectOnce(bestLevel, low, high, bestVol, bestDelta,
+                    reconfirm ? "RECONFIRM_DELTA" : "DELTA_TWO_SIDED", nowMs);
             return;
         }
 
@@ -271,6 +298,7 @@ public class OrderBlockEngine {
             return;
         }
         Block b = new Block(++blockSeq, low, high, bestVol, bestDelta, nowMs);
+        b.reconfirm = reconfirm;
         blocks.add(b);
         if (listener != null) {
             listener.onZoneCandidate(b, nowMs);
@@ -296,5 +324,61 @@ public class OrderBlockEngine {
         if (listener != null) {
             listener.onBlockDead(b, nowMs, reason);
         }
+    }
+
+    // --- approach-speed filter ---------------------------------------------------
+
+    private void recordPricePath(double price, long nowMs) {
+        pricePath.addLast(new double[]{price, nowMs});
+        long horizon = nowMs - settings.obApproachWindowMs;
+        while (!pricePath.isEmpty() && pricePath.peekFirst()[1] < horizon) {
+            pricePath.removeFirst();
+        }
+    }
+
+    /** Net move over the lookback window (signed, current minus oldest). */
+    private double approachMove(long nowMs) {
+        if (pricePath.size() < 2) {
+            return 0;
+        }
+        return pricePath.peekLast()[0] - pricePath.peekFirst()[0];
+    }
+
+    /**
+     * True when price reached the block by slicing toward it faster than the
+     * configured limit: a long block hit by a fast drop (or a short block hit
+     * by a fast rally) is a waterfall, not a controlled retest.
+     */
+    private boolean isFastApproach(Block b, double price, long nowMs) {
+        if (!settings.obApproachFilterEnabled) {
+            return false;
+        }
+        double move = approachMove(nowMs);
+        return b.side == TradeSide.LONG
+                ? move <= -settings.obMaxApproachDollars
+                : move >= settings.obMaxApproachDollars;
+    }
+
+    // --- re-confirmation memory ----------------------------------------------------
+
+    private void penalize(Block b, long nowMs) {
+        if (!settings.obReconfirmEnabled) {
+            return;
+        }
+        penalizedAreas.add(new double[]{b.low, b.high, nowMs + settings.obReconfirmMemoryMs});
+    }
+
+    private boolean isPenalized(double low, double high, long nowMs) {
+        boolean hit = false;
+        Iterator<double[]> it = penalizedAreas.iterator();
+        while (it.hasNext()) {
+            double[] a = it.next();
+            if (nowMs > a[2]) {
+                it.remove();
+            } else if (low <= a[1] && high >= a[0]) {
+                hit = true;
+            }
+        }
+        return hit;
     }
 }

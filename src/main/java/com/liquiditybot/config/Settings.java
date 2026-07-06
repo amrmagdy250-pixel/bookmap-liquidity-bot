@@ -337,6 +337,37 @@ public class Settings {
     /** Cool-down after an OB trade closes before another OB trade may open. */
     public long obCooldownMs = 60000;
 
+    /**
+     * Approach-speed (waterfall) filter: when price reaches a block after
+     * moving toward it by more than this ($) within the lookback window, the
+     * revisit is momentum slicing through the zone, not a controlled retest -
+     * the entry is skipped until the approach slows down.
+     */
+    public boolean obApproachFilterEnabled = true;
+
+    /** Max move toward the zone ($) within the lookback before entries pause. */
+    public double obMaxApproachDollars = 3.0;
+
+    /** Lookback window (ms) used to measure the approach speed. */
+    public long obApproachWindowMs = 30000;
+
+    /**
+     * Flexible re-confirmation instead of a blind blacklist: a level where a
+     * confirmed block was violated is remembered for a while, and a new block
+     * forming there is NOT banned - it just must prove itself harder (bigger
+     * displacement and a cleaner one-sided delta) before it may be traded.
+     */
+    public boolean obReconfirmEnabled = true;
+
+    /** How long (ms) a violated level keeps demanding the stricter proof. */
+    public long obReconfirmMemoryMs = 7200000;
+
+    /** Displacement multiplier demanded from a block on a violated level. */
+    public double obReconfirmDisplacementMult = 1.5;
+
+    /** Min delta ratio demanded from a block on a violated level. */
+    public double obReconfirmDeltaRatio = 0.45;
+
     // ---- Pacing --------------------------------------------------------------
 
     /** Cool-down after a trade closes before another may open. */

@@ -35,6 +35,8 @@ dependencies {
 
 jar {
     // This is the file you load into Bookmap (Settings -> Configure API plugins -> Add).
-    archiveBaseName = 'liquidity-wall-bot'
-    archiveVersion = ''
+    // Bookmap's whitelisting for real-time data requires a unique file name:
+    // <username>_<addon>_<version>.jar
+    archiveBaseName = 'oaccygggosymbuje_liquiditywallbot'
+    archiveVersion = project.hasProperty('botVersion') ? project.botVersion : 'dev'
 }

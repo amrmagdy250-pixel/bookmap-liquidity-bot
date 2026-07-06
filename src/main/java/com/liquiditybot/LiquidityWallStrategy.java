@@ -32,6 +32,7 @@ import velox.api.layer1.annotations.Layer1ApiVersion;
 import velox.api.layer1.annotations.Layer1ApiVersionValue;
 import velox.api.layer1.annotations.Layer1SimpleAttachable;
 import velox.api.layer1.annotations.Layer1StrategyName;
+import velox.api.layer1.annotations.UnrestrictedData;
 import velox.api.layer1.common.Log;
 import velox.api.layer1.data.BalanceInfo;
 import velox.api.layer1.data.ExecutionInfo;
@@ -68,6 +69,7 @@ import velox.gui.StrategyPanel;
 @Layer1SimpleAttachable
 @Layer1StrategyName("Liquidity Wall Bot")
 @Layer1ApiVersion(Layer1ApiVersionValue.VERSION2)
+@UnrestrictedData
 public class LiquidityWallStrategy implements
         CustomModule,
         DepthDataListener,
@@ -152,7 +154,8 @@ public class LiquidityWallStrategy implements
             @Override
             public void onZoneCandidate(OrderBlockEngine.Block b, long now) {
                 blackBox.log(now, "OB_ZONE_CANDIDATE", "blockId", b.id,
-                        "low", b.low, "high", b.high, "volume", b.volume, "delta", b.delta);
+                        "low", b.low, "high", b.high, "volume", b.volume, "delta", b.delta,
+                        "reconfirm", b.reconfirm);
             }
 
             @Override
@@ -172,6 +175,14 @@ public class LiquidityWallStrategy implements
             public void onBlockDead(OrderBlockEngine.Block b, long now, String reason) {
                 blackBox.log(now, "OB_BLOCK_DEAD", "blockId", b.id, "side", b.side,
                         "low", b.low, "high", b.high, "reason", reason);
+            }
+
+            @Override
+            public void onEntrySkipped(OrderBlockEngine.Block b, double price,
+                                       double approachMove, long now) {
+                blackBox.log(now, "OB_ENTRY_SKIPPED", "blockId", b.id, "side", b.side,
+                        "price", price, "reason", "FAST_APPROACH",
+                        "approachMove", Math.round(approachMove * 100.0) / 100.0);
             }
         });
         this.detector = new WallDetector(settings, pips, new WallDetector.Listener() {
@@ -266,7 +277,14 @@ public class LiquidityWallStrategy implements
                 "obOrderSize", settings.obOrderSize,
                 "obTakeProfit", settings.obTakeProfitDollars,
                 "obStopLoss", settings.obStopLossDollars,
-                "obCooldownMs", settings.obCooldownMs);
+                "obCooldownMs", settings.obCooldownMs,
+                "obApproachFilterEnabled", settings.obApproachFilterEnabled,
+                "obMaxApproach", settings.obMaxApproachDollars,
+                "obApproachWindowMs", settings.obApproachWindowMs,
+                "obReconfirmEnabled", settings.obReconfirmEnabled,
+                "obReconfirmMemoryMs", settings.obReconfirmMemoryMs,
+                "obReconfirmDisplacementMult", settings.obReconfirmDisplacementMult,
+                "obReconfirmDeltaRatio", settings.obReconfirmDeltaRatio);
         Log.info("[LiquidityWallBot] initialized on " + alias + " (trading="
                 + settings.enableTrading + ", blackbox=" + blackBox.getJsonPath() + ")");
     }
@@ -776,6 +794,25 @@ public class LiquidityWallStrategy implements
             persist();
         });
         ob.add(obBox);
+
+        JCheckBox obApproachBox = new JCheckBox(
+                "OB approach filter (skip revisits hit by a waterfall)",
+                settings.obApproachFilterEnabled);
+        obApproachBox.addActionListener(e -> {
+            settings.obApproachFilterEnabled = obApproachBox.isSelected();
+            persist();
+        });
+        ob.add(obApproachBox);
+
+        JCheckBox obReconfirmBox = new JCheckBox(
+                "OB re-confirmation on violated levels (stricter proof, no ban)",
+                settings.obReconfirmEnabled);
+        obReconfirmBox.addActionListener(e -> {
+            settings.obReconfirmEnabled = obReconfirmBox.isSelected();
+            persist();
+        });
+        ob.add(obReconfirmBox);
+
         ob.add(grid(
                 spinner("OB min zone volume", settings.obMinZoneVolume, 1, 1000000, 10,
                         v -> settings.obMinZoneVolume = (int) v),
@@ -806,7 +843,17 @@ public class LiquidityWallStrategy implements
                 spinner("OB stop loss ($)", settings.obStopLossDollars, 0.25, 1000, 0.25,
                         v -> settings.obStopLossDollars = v),
                 spinner("OB cooldown (ms)", settings.obCooldownMs, 0, 3600000, 5000,
-                        v -> settings.obCooldownMs = (long) v)));
+                        v -> settings.obCooldownMs = (long) v),
+                spinner("OB max approach ($)", settings.obMaxApproachDollars, 0.25, 100, 0.25,
+                        v -> settings.obMaxApproachDollars = v),
+                spinner("OB approach window (ms)", settings.obApproachWindowMs, 1000, 600000, 5000,
+                        v -> settings.obApproachWindowMs = (long) v),
+                spinner("OB reconfirm memory (ms)", settings.obReconfirmMemoryMs, 0, 86400000, 600000,
+                        v -> settings.obReconfirmMemoryMs = (long) v),
+                spinner("OB reconfirm displacement (x)", settings.obReconfirmDisplacementMult, 1, 10, 0.25,
+                        v -> settings.obReconfirmDisplacementMult = v),
+                spinner("OB reconfirm delta ratio", settings.obReconfirmDeltaRatio, 0, 1, 0.05,
+                        v -> settings.obReconfirmDeltaRatio = v)));
 
         JButton obReload = new JButton("Apply & reload");
         obReload.addActionListener(e -> api.reload());
