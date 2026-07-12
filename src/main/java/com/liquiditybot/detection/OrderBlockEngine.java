@@ -48,6 +48,11 @@ public class OrderBlockEngine {
         public int tradesTaken = 0;
         long lastFastSkipMs = 0;
 
+        // Retest-confirmation state: armed on the first touch after leftZone.
+        long retestStartMs = 0;
+        double retestExtreme = Double.NaN;
+        long lastRetestSkipMs = 0;
+
         Block(long id, double low, double high, double volume, double delta, long formedAt) {
             this.id = id;
             this.low = low;
@@ -79,7 +84,7 @@ public class OrderBlockEngine {
                             String reason, long now);
         void onBlockConfirmed(Block b, long now);
         void onBlockDead(Block b, long now, String reason);
-        void onEntrySkipped(Block b, double price, double approachMove, long now);
+        void onEntrySkipped(Block b, double price, String reason, double detail, long now);
     }
 
     private static final class Exec {
@@ -217,14 +222,56 @@ public class OrderBlockEngine {
                 continue;
             }
 
-            // Revisit: price back inside the zone (within tolerance).
-            boolean inside = price >= b.low - settings.obEntryToleranceDollars
-                    && price <= b.high + settings.obEntryToleranceDollars;
+            // Revisit: price back inside the zone. Tolerance only extends the
+            // NEAR edge (the side price returns from); past the far edge the
+            // entry would be chasing beyond the block, not buying/selling it.
+            boolean inside = b.side == TradeSide.LONG
+                    ? price >= b.low - settings.obEntryToleranceDollars && price <= b.high
+                    : price >= b.low && price <= b.high + settings.obEntryToleranceDollars;
+
+            if (b.retestStartMs != 0) {
+                // Keep tracking the adverse extreme even on dips just outside
+                // the near edge; only a clean exit through the FAR side (the
+                // retest ended without an entry) rewinds the state.
+                boolean adverse = b.side == TradeSide.LONG
+                        ? price < b.retestExtreme : price > b.retestExtreme;
+                if (adverse) {
+                    b.retestExtreme = price;
+                }
+                boolean leftFar = b.side == TradeSide.LONG
+                        ? price > b.high + settings.obEntryToleranceDollars
+                        : price < b.low - settings.obEntryToleranceDollars;
+                if (leftFar) {
+                    b.retestStartMs = 0;
+                    b.retestExtreme = Double.NaN;
+                }
+            }
+
             if (b.leftZone && inside && signal == null) {
+                if (b.retestStartMs == 0) {
+                    b.retestStartMs = nowMs;
+                    b.retestExtreme = price;
+                }
+                if (settings.obRetestConfirmEnabled) {
+                    double mult = b.reconfirm ? settings.obReconfirmRetestMult : 1.0;
+                    long dwellNeeded = (long) (settings.obRetestDwellMs * mult);
+                    double reversalNeeded = settings.obRetestReversalDollars * mult;
+                    long dwelled = nowMs - b.retestStartMs;
+                    if (dwelled < dwellNeeded) {
+                        skipOnce(b, price, "RETEST_DWELL", dwellNeeded - dwelled, nowMs);
+                        continue;
+                    }
+                    double recovered = b.side == TradeSide.LONG
+                            ? price - b.retestExtreme : b.retestExtreme - price;
+                    if (recovered < reversalNeeded) {
+                        skipOnce(b, price, "RETEST_NO_REVERSAL", recovered, nowMs);
+                        continue;
+                    }
+                }
                 if (isFastApproach(b, price, nowMs)) {
                     if (listener != null && nowMs - b.lastFastSkipMs >= settings.obApproachWindowMs) {
                         b.lastFastSkipMs = nowMs;
-                        listener.onEntrySkipped(b, price, approachMove(nowMs), nowMs);
+                        listener.onEntrySkipped(b, price, "FAST_APPROACH", approachMove(nowMs), nowMs);
                     }
                     continue;
                 }
@@ -234,10 +281,31 @@ public class OrderBlockEngine {
         return signal;
     }
 
+    /** Wipe every piece of market memory for a fresh session. */
+    public void resetForNewSession() {
+        recentExecs.clear();
+        blocks.clear();
+        pricePath.clear();
+        penalizedAreas.clear();
+        lastZoneScanMs = 0;
+        lastRejectLevel = Long.MIN_VALUE;
+        lastRejectMs = 0;
+    }
+
     /** Mark a block as traded (called when the entry actually fires). */
     public void markTraded(Block b) {
         b.tradesTaken++;
         b.leftZone = false; // must leave and return again for another trade
+        b.retestStartMs = 0;
+        b.retestExtreme = Double.NaN;
+    }
+
+    /** Throttled entry-skip diagnostic (once per dwell period per block). */
+    private void skipOnce(Block b, double price, String reason, double detail, long nowMs) {
+        if (listener != null && nowMs - b.lastRetestSkipMs >= settings.obRetestDwellMs) {
+            b.lastRetestSkipMs = nowMs;
+            listener.onEntrySkipped(b, price, reason, detail, nowMs);
+        }
     }
 
     // --- zone building ---------------------------------------------------------

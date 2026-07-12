@@ -238,6 +238,11 @@ public class WallDetector {
         return list;
     }
 
+    /** Drop all tracked walls for a fresh session (they re-detect from the live book). */
+    public void resetForNewSession() {
+        tracked.clear();
+    }
+
     private static final class Candidate {
         final LiquidityWall.Side side;
         final int level;

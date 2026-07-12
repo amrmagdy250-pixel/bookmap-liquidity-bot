@@ -71,6 +71,12 @@ public class WaveTracker {
     private double troughX;     // farthest pull-back away from the wall (the peak)
     private boolean fired;      // already signalled for the current trough
 
+    // Bottom-confirmation state (higher-low structure off the trough).
+    private boolean bouncing;
+    private double bounceMaxX;
+    private boolean pullingBack;
+    private double pullLowX;
+
     public WaveTracker(Settings settings, SwingMemory swings) {
         this.settings = settings;
         this.swings = swings;
@@ -99,6 +105,7 @@ public class WaveTracker {
         this.swingMaxX = x;
         this.troughX = x;
         this.fired = false;
+        resetBottomState();
     }
 
     public void disarm() {
@@ -124,12 +131,14 @@ public class WaveTracker {
             swingMaxX = x;
             troughX = x;
             fired = false;
+            resetBottomState();
             return null;
         }
 
         if (x < troughX) {
             troughX = x;
             fired = false; // deeper pull-back: allow a new entry at the new extreme
+            resetBottomState();
         }
 
         if (fired) {
@@ -146,6 +155,35 @@ public class WaveTracker {
 
         if (!(amplitudeOk && distanceOk && turned)) {
             return null;
+        }
+
+        // --- bottom confirmation (wait for a real bottom, not sideways drift) --
+        // The first turn alone is not enough: price must bounce off the trough,
+        // pull back WITHOUT taking the trough out (a higher low), then turn
+        // toward the wall again. A market drifting sideways keeps making new
+        // troughs and never builds this structure, so no entry fires into it.
+        if (settings.waveBottomConfirmEnabled) {
+            if (!bouncing) {
+                bouncing = true;
+                bounceMaxX = x;
+                return null;
+            }
+            if (x > bounceMaxX) {
+                bounceMaxX = x;
+            }
+            if (!pullingBack) {
+                if (bounceMaxX - x >= settings.waveBottomPullbackDollars) {
+                    pullingBack = true;
+                    pullLowX = x;
+                }
+                return null;
+            }
+            if (x < pullLowX) {
+                pullLowX = x;
+            }
+            if (x < pullLowX + sign0(settings.turnConfirmDollars)) {
+                return null; // higher low not reclaimed yet
+            }
         }
 
         // --- smart peak filter ------------------------------------------------
@@ -198,6 +236,13 @@ public class WaveTracker {
         lastSkipReason = null;
         return new EntrySignal(side, price, sign * wallX, amplitude, distanceFromWall,
                 peakPrice, recentExtreme);
+    }
+
+    private void resetBottomState() {
+        bouncing = false;
+        bounceMaxX = Double.NEGATIVE_INFINITY;
+        pullingBack = false;
+        pullLowX = Double.POSITIVE_INFINITY;
     }
 
     private static double sign0(double v) {

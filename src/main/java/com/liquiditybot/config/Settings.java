@@ -114,6 +114,18 @@ public class Settings {
     public double turnConfirmDollars = 1.0;
 
     /**
+     * Require a real BOTTOM, not just the first turn: after the initial turn
+     * off the trough, price must pull back by {@code waveBottomPullbackDollars}
+     * WITHOUT taking the trough out (a higher low) and then turn toward the
+     * wall again. A sideways drift keeps nudging new troughs and never builds
+     * this structure, so it can no longer produce an entry.
+     */
+    public boolean waveBottomConfirmEnabled = true;
+
+    /** Pull-back from the bounce top needed to start the higher-low test ($). */
+    public double waveBottomPullbackDollars = 0.75;
+
+    /**
      * Re-targeting a wall on the same side within this many dollars of the
      * previous target resumes the wave state instead of resetting it. A big
      * wall whose size breathes around the confirm threshold flickers
@@ -341,15 +353,38 @@ public class Settings {
      * Approach-speed (waterfall) filter: when price reaches a block after
      * moving toward it by more than this ($) within the lookback window, the
      * revisit is momentum slicing through the zone, not a controlled retest -
-     * the entry is skipped until the approach slows down.
+     * the entry is skipped until the approach slows down. Replay showed this
+     * net-move check delays winners more than it prevents losses, so it is
+     * OFF by default and kept only as an optional extra.
      */
-    public boolean obApproachFilterEnabled = true;
+    public boolean obApproachFilterEnabled = false;
 
     /** Max move toward the zone ($) within the lookback before entries pause. */
     public double obMaxApproachDollars = 3.0;
 
     /** Lookback window (ms) used to measure the approach speed. */
     public long obApproachWindowMs = 30000;
+
+    /**
+     * Retest confirmation: the FIRST touch of a block never enters. Price must
+     * hold inside/near the zone for {@code obRetestDwellMs}, stop making new
+     * adverse extremes, and turn back off that extreme by
+     * {@code obRetestReversalDollars} before the entry fires. A waterfall that
+     * slices the zone keeps extending the extreme (or violates the block) and
+     * never confirms; a controlled retest does. Blocks flagged
+     * {@code reconfirm} (formed on a recently violated level) must prove a
+     * dwell and reversal {@code obReconfirmRetestMult} times stronger.
+     */
+    public boolean obRetestConfirmEnabled = true;
+
+    /** Minimum time (ms) price must spend in the retest before an entry. */
+    public long obRetestDwellMs = 15000;
+
+    /** Turn off the retest's adverse extreme required to enter ($). */
+    public double obRetestReversalDollars = 0.75;
+
+    /** Dwell/reversal multiplier applied to reconfirm (violated-level) blocks. */
+    public double obReconfirmRetestMult = 2.0;
 
     /**
      * Flexible re-confirmation instead of a blind blacklist: a level where a
@@ -367,6 +402,32 @@ public class Settings {
 
     /** Min delta ratio demanded from a block on a violated level. */
     public double obReconfirmDeltaRatio = 0.45;
+
+    /**
+     * Cut an open OB trade early the moment its own block is violated (price
+     * through the far side by {@code obInvalidationDollars}) instead of riding
+     * the full stop loss: once the zone has failed, the trade's premise is
+     * gone and the remaining stop distance is pure hope.
+     */
+    public boolean obExitOnViolation = true;
+
+    // ---- Session guard (daily cutoff + memory flush) ---------------------------
+
+    /**
+     * Daily trading cutoff on a fixed UTC clock (independent of the machine's
+     * timezone, so moving Bookmap to any VPS changes nothing). From the cutoff
+     * until the resume time no new trades fire (open trades keep their normal
+     * TP/SL management), and at the resume every engine's memory (blocks,
+     * penalties, waves, pivots, spoof/re-entry history, revenge state) is
+     * wiped so the new day starts clean.
+     */
+    public boolean sessionGuardEnabled = true;
+
+    /** Cutoff, minutes after midnight UTC. 1230 = 20:30 UTC = 23:30 Riyadh. */
+    public int sessionCutoffUtcMinutes = 1230;
+
+    /** Resume, minutes after midnight UTC. 1320 = 22:00 UTC = 01:00 Riyadh. */
+    public int sessionResumeUtcMinutes = 1320;
 
     // ---- Pacing --------------------------------------------------------------
 

@@ -38,6 +38,8 @@ public class ObTradeManager {
     private long entryTime;
     private long blockId;
     private double blockCenter;
+    private double blockLow;
+    private double blockHigh;
 
     private int wins = 0;
     private int losses = 0;
@@ -88,6 +90,8 @@ public class ObTradeManager {
         this.side = block.side;
         this.blockId = block.id;
         this.blockCenter = block.center();
+        this.blockLow = block.low;
+        this.blockHigh = block.high;
         this.entryTime = nowMs;
         this.entryPrice = price;
         if (side == TradeSide.LONG) {
@@ -130,12 +134,18 @@ public class ObTradeManager {
                 reason = "TAKE_PROFIT";
             } else if (price <= slPrice) {
                 reason = "STOP_LOSS";
+            } else if (settings.obExitOnViolation
+                    && price < blockLow - settings.obInvalidationDollars) {
+                reason = "BLOCK_VIOLATED";
             }
         } else {
             if (price <= tpPrice) {
                 reason = "TAKE_PROFIT";
             } else if (price >= slPrice) {
                 reason = "STOP_LOSS";
+            } else if (settings.obExitOnViolation
+                    && price > blockHigh + settings.obInvalidationDollars) {
+                reason = "BLOCK_VIOLATED";
             }
         }
         if (reason != null) {

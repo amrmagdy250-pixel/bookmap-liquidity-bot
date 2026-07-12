@@ -102,6 +102,14 @@ public class SwingMemory {
         return min;
     }
 
+    /** Wipe all pivots and leg state for a fresh session. */
+    public void reset() {
+        pivots.clear();
+        started = false;
+        dir = 0;
+        legExtreme = 0;
+    }
+
     private void addPivot(long nowMs, double price, boolean high) {
         pivots.addLast(new Pivot(nowMs, price, high));
     }

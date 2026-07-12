@@ -105,6 +105,9 @@ public class LiquidityWallStrategy implements
     private long lastDetectMs = 0;
     private long activeTargetId = -1;
 
+    /** True between the daily UTC cutoff and the resume: no new entries fire. */
+    private boolean sessionPaused = false;
+
     /** Trades already taken per wall id, to cap entries on a single wall. */
     private final java.util.Map<Long, Integer> tradesPerWall = new java.util.HashMap<>();
 
@@ -179,10 +182,10 @@ public class LiquidityWallStrategy implements
 
             @Override
             public void onEntrySkipped(OrderBlockEngine.Block b, double price,
-                                       double approachMove, long now) {
+                                       String reason, double detail, long now) {
                 blackBox.log(now, "OB_ENTRY_SKIPPED", "blockId", b.id, "side", b.side,
-                        "price", price, "reason", "FAST_APPROACH",
-                        "approachMove", Math.round(approachMove * 100.0) / 100.0);
+                        "price", price, "reason", reason,
+                        "detail", Math.round(detail * 100.0) / 100.0);
             }
         });
         this.detector = new WallDetector(settings, pips, new WallDetector.Listener() {
@@ -260,7 +263,12 @@ public class LiquidityWallStrategy implements
                 "revengeConfirm", settings.revengeConfirmDollars,
                 "revengeMaxBeyondStop", settings.revengeMaxBeyondStopDollars,
                 "revengeCancelOnOppositeWall", settings.revengeCancelOnOppositeWall,
-                "cooldownMsAfterTrade", settings.cooldownMsAfterTrade);
+                "cooldownMsAfterTrade", settings.cooldownMsAfterTrade,
+                "waveBottomConfirmEnabled", settings.waveBottomConfirmEnabled,
+                "waveBottomPullback", settings.waveBottomPullbackDollars,
+                "sessionGuardEnabled", settings.sessionGuardEnabled,
+                "sessionCutoffUtcMinutes", settings.sessionCutoffUtcMinutes,
+                "sessionResumeUtcMinutes", settings.sessionResumeUtcMinutes);
         blackBox.log(nowMs, "OB_SETTINGS",
                 "obEnabled", settings.obEnabled,
                 "obMinZoneVolume", settings.obMinZoneVolume,
@@ -284,7 +292,12 @@ public class LiquidityWallStrategy implements
                 "obReconfirmEnabled", settings.obReconfirmEnabled,
                 "obReconfirmMemoryMs", settings.obReconfirmMemoryMs,
                 "obReconfirmDisplacementMult", settings.obReconfirmDisplacementMult,
-                "obReconfirmDeltaRatio", settings.obReconfirmDeltaRatio);
+                "obReconfirmDeltaRatio", settings.obReconfirmDeltaRatio,
+                "obRetestConfirmEnabled", settings.obRetestConfirmEnabled,
+                "obRetestDwellMs", settings.obRetestDwellMs,
+                "obRetestReversal", settings.obRetestReversalDollars,
+                "obReconfirmRetestMult", settings.obReconfirmRetestMult,
+                "obExitOnViolation", settings.obExitOnViolation);
         Log.info("[LiquidityWallBot] initialized on " + alias + " (trading="
                 + settings.enableTrading + ", blackbox=" + blackBox.getJsonPath() + ")");
     }
@@ -307,6 +320,60 @@ public class LiquidityWallStrategy implements
         if (tradeManager != null) {
             tradeManager.setNow(nowMs);
         }
+        updateSession();
+    }
+
+    /**
+     * Session guard on a fixed UTC clock (epoch data time, so the machine's
+     * timezone is irrelevant): between the cutoff and the resume no new entry
+     * fires (open trades keep their normal TP/SL management), and at the
+     * resume every engine's memory is wiped so the new day starts clean.
+     */
+    private void updateSession() {
+        boolean paused = isSessionPausedNow();
+        if (paused == sessionPaused) {
+            return;
+        }
+        sessionPaused = paused;
+        if (blackBox == null) {
+            return;
+        }
+        if (paused) {
+            blackBox.log(nowMs, "SESSION_TRADING_PAUSED",
+                    "cutoffUtcMinutes", settings.sessionCutoffUtcMinutes,
+                    "resumeUtcMinutes", settings.sessionResumeUtcMinutes);
+        } else {
+            resetForNewSession();
+            blackBox.log(nowMs, "SESSION_RESET",
+                    "resumeUtcMinutes", settings.sessionResumeUtcMinutes);
+        }
+    }
+
+    private boolean isSessionPausedNow() {
+        if (!settings.sessionGuardEnabled || nowMs <= 0) {
+            return false;
+        }
+        int minuteOfDayUtc = (int) ((nowMs / 60000L) % 1440L);
+        int cutoff = settings.sessionCutoffUtcMinutes;
+        int resume = settings.sessionResumeUtcMinutes;
+        return cutoff <= resume
+                ? minuteOfDayUtc >= cutoff && minuteOfDayUtc < resume
+                : minuteOfDayUtc >= cutoff || minuteOfDayUtc < resume;
+    }
+
+    /** Wipe every engine's memory so yesterday's levels can't trigger entries. */
+    private void resetForNewSession() {
+        obEngine.resetForNewSession();
+        detector.resetForNewSession();
+        swings.reset();
+        waveTracker.disarm();
+        revengeEngine.reset();
+        tradesPerWall.clear();
+        pullHistory.clear();
+        spoofLoggedWalls.clear();
+        lastEntryExtremeByLevel.clear();
+        activeTargetId = -1;
+        tradeManager.clearActiveWallIfFlat();
     }
 
     @Override
@@ -344,7 +411,7 @@ public class LiquidityWallStrategy implements
         }
         lastDetectMs = nowMs;
         detector.detect(book, mid, nowMs);
-        if (settings.wallStrategyEnabled && tradeManager.isFlat()) {
+        if (settings.wallStrategyEnabled && !sessionPaused && tradeManager.isFlat()) {
             ensureTarget(mid);
         }
     }
@@ -360,14 +427,19 @@ public class LiquidityWallStrategy implements
         obTradeManager.setNow(nowMs);
         obTradeManager.onPrice(price);
         OrderBlockEngine.EntrySignal obSig = obEngine.onPrice(price, nowMs);
-        if (obSig != null && obTradeManager.canEnter()
-                && obTradeManager.openTrade(obSig.block, obSig.price)) {
-            obEngine.markTraded(obSig.block);
+        if (obSig != null && obTradeManager.canEnter()) {
+            if (sessionPaused) {
+                blackBox.log(nowMs, "OB_ENTRY_SKIPPED", "blockId", obSig.block.id,
+                        "side", obSig.block.side, "price", price,
+                        "reason", "SESSION_PAUSED", "detail", 0);
+            } else if (obTradeManager.openTrade(obSig.block, obSig.price)) {
+                obEngine.markTraded(obSig.block);
+            }
         }
 
         drawTradeLines();
 
-        if (!settings.wallStrategyEnabled || !tradeManager.isFlat()) {
+        if (!settings.wallStrategyEnabled || !tradeManager.isFlat() || sessionPaused) {
             return;
         }
 
@@ -712,6 +784,20 @@ public class LiquidityWallStrategy implements
             persist();
         });
 
+        JCheckBox waveBottomBox = new JCheckBox("Wave bottom confirm (wait for a held higher low)",
+                settings.waveBottomConfirmEnabled);
+        waveBottomBox.addActionListener(e -> {
+            settings.waveBottomConfirmEnabled = waveBottomBox.isSelected();
+            persist();
+        });
+
+        JCheckBox sessionBox = new JCheckBox("Session guard (UTC cutoff + daily memory reset)",
+                settings.sessionGuardEnabled);
+        sessionBox.addActionListener(e -> {
+            settings.sessionGuardEnabled = sessionBox.isSelected();
+            persist();
+        });
+
         main.add(tradingBox);
         main.add(wallStrategyBox);
         main.add(magnetBox);
@@ -720,6 +806,8 @@ public class LiquidityWallStrategy implements
         main.add(spoofBox);
         main.add(noHistoryBox);
         main.add(reentryBox);
+        main.add(waveBottomBox);
+        main.add(sessionBox);
         main.add(grid(
                 spinner("Take profit ($)", settings.takeProfitDollars, 0.25, 1000, 0.25,
                         v -> settings.takeProfitDollars = v),
@@ -778,7 +866,13 @@ public class LiquidityWallStrategy implements
                 spinner("Order size", settings.orderSize, 1, 1000, 1,
                         v -> settings.orderSize = (int) v),
                 spinner("Cooldown after trade (ms)", settings.cooldownMsAfterTrade, 0, 600000, 500,
-                        v -> settings.cooldownMsAfterTrade = (long) v)));
+                        v -> settings.cooldownMsAfterTrade = (long) v),
+                spinner("Wave bottom pullback ($)", settings.waveBottomPullbackDollars, 0, 100, 0.25,
+                        v -> settings.waveBottomPullbackDollars = v),
+                spinner("Session cutoff (UTC min of day)", settings.sessionCutoffUtcMinutes, 0, 1439, 5,
+                        v -> settings.sessionCutoffUtcMinutes = (int) v),
+                spinner("Session resume (UTC min of day)", settings.sessionResumeUtcMinutes, 0, 1439, 5,
+                        v -> settings.sessionResumeUtcMinutes = (int) v)));
 
         JButton reload = new JButton("Apply & reload");
         reload.addActionListener(e -> api.reload());
@@ -812,6 +906,24 @@ public class LiquidityWallStrategy implements
             persist();
         });
         ob.add(obReconfirmBox);
+
+        JCheckBox obRetestBox = new JCheckBox(
+                "OB retest confirm (dwell + reversal before entry)",
+                settings.obRetestConfirmEnabled);
+        obRetestBox.addActionListener(e -> {
+            settings.obRetestConfirmEnabled = obRetestBox.isSelected();
+            persist();
+        });
+        ob.add(obRetestBox);
+
+        JCheckBox obViolationBox = new JCheckBox(
+                "OB exit early when block is violated",
+                settings.obExitOnViolation);
+        obViolationBox.addActionListener(e -> {
+            settings.obExitOnViolation = obViolationBox.isSelected();
+            persist();
+        });
+        ob.add(obViolationBox);
 
         ob.add(grid(
                 spinner("OB min zone volume", settings.obMinZoneVolume, 1, 1000000, 10,
@@ -853,7 +965,13 @@ public class LiquidityWallStrategy implements
                 spinner("OB reconfirm displacement (x)", settings.obReconfirmDisplacementMult, 1, 10, 0.25,
                         v -> settings.obReconfirmDisplacementMult = v),
                 spinner("OB reconfirm delta ratio", settings.obReconfirmDeltaRatio, 0, 1, 0.05,
-                        v -> settings.obReconfirmDeltaRatio = v)));
+                        v -> settings.obReconfirmDeltaRatio = v),
+                spinner("OB retest dwell (ms)", settings.obRetestDwellMs, 0, 600000, 5000,
+                        v -> settings.obRetestDwellMs = (long) v),
+                spinner("OB retest reversal ($)", settings.obRetestReversalDollars, 0, 100, 0.25,
+                        v -> settings.obRetestReversalDollars = v),
+                spinner("OB reconfirm retest (x)", settings.obReconfirmRetestMult, 1, 10, 0.25,
+                        v -> settings.obReconfirmRetestMult = v)));
 
         JButton obReload = new JButton("Apply & reload");
         obReload.addActionListener(e -> api.reload());
