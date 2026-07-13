@@ -242,8 +242,16 @@ public class OrderBlockEngine {
                         ? price > b.high + settings.obEntryToleranceDollars
                         : price < b.low - settings.obEntryToleranceDollars;
                 if (leftFar) {
+                    // Exiting through the FAR (profit) side is itself the bounce
+                    // confirmation: a waterfall never does this - it violates the
+                    // near side instead. Enter immediately rather than demanding
+                    // the dwell that only slow bases can satisfy.
+                    if (settings.obRetestConfirmEnabled && b.leftZone && signal == null) {
+                        signal = new EntrySignal(b, price);
+                    }
                     b.retestStartMs = 0;
                     b.retestExtreme = Double.NaN;
+                    continue;
                 }
             }
 
