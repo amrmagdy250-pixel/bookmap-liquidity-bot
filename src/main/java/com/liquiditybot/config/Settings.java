@@ -416,7 +416,7 @@ public class Settings {
      * the full stop loss: once the zone has failed, the trade's premise is
      * gone and the remaining stop distance is pure hope.
      */
-    public boolean obExitOnViolation = true;
+    public boolean obExitOnViolation = false;
 
     // ---- Session guard (daily cutoff + memory flush) ---------------------------
 
