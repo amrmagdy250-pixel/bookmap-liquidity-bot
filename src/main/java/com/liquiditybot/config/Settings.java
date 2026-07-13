@@ -85,6 +85,13 @@ public class Settings {
     /** Ignore walls farther than this (price dollars) from current price. */
     public double maxWallDistanceDollars = 30.0;
 
+    /**
+     * Switch the active target to a newly confirmed wall only when it is nearer
+     * than the current one by at least this much (price dollars) - keeps stacked
+     * walls worked nearest-first without flip-flopping between similar levels.
+     */
+    public double wallRetargetImprovementDollars = 2.0;
+
     // ---- Trade sizing & risk -------------------------------------------------
 
     public int orderSize = 1;

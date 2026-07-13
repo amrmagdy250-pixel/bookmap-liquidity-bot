@@ -235,6 +235,7 @@ public class LiquidityWallStrategy implements
                 "wallClusterTicks", settings.wallClusterTicks,
                 "wallPersistenceMs", settings.wallPersistenceMs,
                 "maxWallDistance", settings.maxWallDistanceDollars,
+                "wallRetargetImprovement", settings.wallRetargetImprovementDollars,
                 "orderSize", settings.orderSize,
                 "minEntryDistance", settings.minEntryDistanceFromWallDollars,
                 "maxEntryDistance", settings.maxEntryDistanceFromWallDollars,
@@ -533,16 +534,15 @@ public class LiquidityWallStrategy implements
     }
 
     /**
-     * Pick / keep the active target wall. We keep the current target while it is
-     * still confirmed; only when it breaks do we move to the next-nearest one -
-     * this gives the requested "nearest first, then the next when the first is
-     * gone" behaviour for stacked walls.
+     * Pick / keep the active target wall. The current target is kept while it is
+     * still confirmed, unless a clearly nearer eligible wall appears - stacked
+     * walls are always worked nearest-first, and the freed slot moves to the
+     * next-nearest when a wall breaks.
      */
     private void ensureTarget(double price) {
-        if (activeTargetId != -1 && detector.isStillActive(activeTargetId)) {
-            return;
-        }
-        if (activeTargetId != -1) {
+        LiquidityWall current = activeTargetId != -1 && detector.isStillActive(activeTargetId)
+                ? findWall(activeTargetId) : null;
+        if (activeTargetId != -1 && current == null) {
             blackBox.log(nowMs, "TARGET_LOST", "wallId", activeTargetId);
             activeTargetId = -1;
             waveTracker.disarm();
@@ -575,6 +575,18 @@ public class LiquidityWallStrategy implements
         }
         if (nearest == null) {
             return;
+        }
+        if (current != null) {
+            double currentDist = Math.abs(current.price - price);
+            if (nearest.id == current.id
+                    || bestDist >= currentDist - settings.wallRetargetImprovementDollars) {
+                return; // keep the current target unless the new wall is clearly nearer
+            }
+            blackBox.log(nowMs, "TARGET_SWITCHED", "fromWallId", current.id,
+                    "fromDistance", Math.round(currentDist * 100.0) / 100.0,
+                    "toWallId", nearest.id);
+            waveTracker.disarm();
+            tradeManager.clearActiveWallIfFlat();
         }
 
         TradeSide side = mapSide(nearest.side);
@@ -825,6 +837,8 @@ public class LiquidityWallStrategy implements
                         v -> settings.wallPersistenceMs = (long) v),
                 spinner("Max wall distance ($)", settings.maxWallDistanceDollars, 1, 10000, 1,
                         v -> settings.maxWallDistanceDollars = v),
+                spinner("Retarget if nearer by ($)", settings.wallRetargetImprovementDollars, 0, 1000, 0.5,
+                        v -> settings.wallRetargetImprovementDollars = v),
                 spinner("Wave min amplitude ($)", settings.waveMinAmplitudeDollars, 0, 1000, 0.5,
                         v -> settings.waveMinAmplitudeDollars = v),
                 spinner("Min entry dist from wall ($)", settings.minEntryDistanceFromWallDollars, 0, 1000, 0.5,
