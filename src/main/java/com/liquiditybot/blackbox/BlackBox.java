@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -36,30 +37,57 @@ public class BlackBox {
     private final Thread worker;
     private volatile boolean running = true;
 
+    private static final DateTimeFormatter DAY =
+            DateTimeFormatter.ofPattern("yyyyMMdd").withZone(ZoneOffset.UTC);
+
+    private final String safeAlias;
     private Writer jsonWriter;
     private Writer textWriter;
     private Path jsonPath;
+    private String openDay;
 
     public BlackBox(String alias) {
+        this.safeAlias = alias == null ? "unknown" : alias.replaceAll("[^a-zA-Z0-9._-]", "_");
+        openWritersForToday();
+        this.worker = new Thread(this::drainLoop, "liquidity-bot-blackbox");
+        this.worker.setDaemon(true);
+        this.worker.start();
+    }
+
+    /**
+     * One file per UTC day, opened in append mode: every reload/restart during
+     * the same day keeps writing to the same file, and a fresh file starts
+     * automatically when the day rolls over.
+     */
+    private void openWritersForToday() {
         Path dir = resolveLogDir();
-        String safeAlias = alias == null ? "unknown" : alias.replaceAll("[^a-zA-Z0-9._-]", "_");
-        String stamp = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
-                .withZone(ZoneOffset.UTC).format(Instant.now());
+        String day = DAY.format(Instant.now());
         try {
             Files.createDirectories(dir);
-            this.jsonPath = dir.resolve("blackbox-" + safeAlias + "-" + stamp + ".jsonl");
-            Path textPath = dir.resolve("blackbox-" + safeAlias + "-" + stamp + ".log");
-            this.jsonWriter = new BufferedWriter(Files.newBufferedWriter(jsonPath, StandardCharsets.UTF_8));
-            this.textWriter = new BufferedWriter(Files.newBufferedWriter(textPath, StandardCharsets.UTF_8));
+            this.jsonPath = dir.resolve("blackbox-" + safeAlias + "-" + day + ".jsonl");
+            Path textPath = dir.resolve("blackbox-" + safeAlias + "-" + day + ".log");
+            this.jsonWriter = new BufferedWriter(Files.newBufferedWriter(jsonPath, StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.APPEND));
+            this.textWriter = new BufferedWriter(Files.newBufferedWriter(textPath, StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.APPEND));
+            this.openDay = day;
         } catch (IOException e) {
             // Logging must never crash the bot. Fall back to no-op writers.
             this.jsonWriter = null;
             this.textWriter = null;
+            this.openDay = day;
         }
+    }
 
-        this.worker = new Thread(this::drainLoop, "liquidity-bot-blackbox");
-        this.worker.setDaemon(true);
-        this.worker.start();
+    private void rotateIfNewDay() {
+        String day = DAY.format(Instant.now());
+        if (day.equals(openDay)) {
+            return;
+        }
+        flush();
+        closeQuietly(jsonWriter);
+        closeQuietly(textWriter);
+        openWritersForToday();
     }
 
     private static Path resolveLogDir() {
@@ -102,6 +130,7 @@ public class BlackBox {
                     flush();
                     continue;
                 }
+                rotateIfNewDay();
                 if (jsonWriter != null) {
                     jsonWriter.write(line[0]);
                     jsonWriter.write('\n');
