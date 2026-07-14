@@ -418,6 +418,14 @@ public class Settings {
      */
     public boolean obExitOnViolation = false;
 
+    /**
+     * Minimum aggressor-delta lean (|delta| / volume) a block needs for the
+     * instant fast-bounce entry when price exits through the far side of the
+     * zone. Weaker blocks are not banned - they can still be traded, but only
+     * after the full dwell + reversal retest proves the level.
+     */
+    public double obFastEntryDeltaRatio = 0.4;
+
     // ---- Session guard (daily cutoff + memory flush) ---------------------------
 
     /**

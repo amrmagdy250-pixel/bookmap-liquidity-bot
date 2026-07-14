@@ -298,7 +298,8 @@ public class LiquidityWallStrategy implements
                 "obRetestDwellMs", settings.obRetestDwellMs,
                 "obRetestReversal", settings.obRetestReversalDollars,
                 "obReconfirmRetestMult", settings.obReconfirmRetestMult,
-                "obExitOnViolation", settings.obExitOnViolation);
+                "obExitOnViolation", settings.obExitOnViolation,
+                "obFastEntryDeltaRatio", settings.obFastEntryDeltaRatio);
         Log.info("[LiquidityWallBot] initialized on " + alias + " (trading="
                 + settings.enableTrading + ", blackbox=" + blackBox.getJsonPath() + ")");
     }
@@ -985,7 +986,9 @@ public class LiquidityWallStrategy implements
                 spinner("OB retest reversal ($)", settings.obRetestReversalDollars, 0, 100, 0.25,
                         v -> settings.obRetestReversalDollars = v),
                 spinner("OB reconfirm retest (x)", settings.obReconfirmRetestMult, 1, 10, 0.25,
-                        v -> settings.obReconfirmRetestMult = v)));
+                        v -> settings.obReconfirmRetestMult = v),
+                spinner("OB fast-entry delta ratio", settings.obFastEntryDeltaRatio, 0, 1, 0.05,
+                        v -> settings.obFastEntryDeltaRatio = v)));
 
         JButton obReload = new JButton("Apply & reload");
         obReload.addActionListener(e -> api.reload());

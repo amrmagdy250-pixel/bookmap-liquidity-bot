@@ -244,10 +244,17 @@ public class OrderBlockEngine {
                 if (leftFar) {
                     // Exiting through the FAR (profit) side is itself the bounce
                     // confirmation: a waterfall never does this - it violates the
-                    // near side instead. Enter immediately rather than demanding
-                    // the dwell that only slow bases can satisfy.
+                    // near side instead. The instant entry is reserved for blocks
+                    // whose delta clearly leaned one way; weaker blocks stay
+                    // tradable, but only through the full dwell+reversal retest.
+                    double deltaRatio = b.volume > 0 ? Math.abs(b.delta) / b.volume : 0;
+                    boolean strongDelta = deltaRatio >= settings.obFastEntryDeltaRatio;
                     if (settings.obRetestConfirmEnabled && b.leftZone && signal == null) {
-                        signal = new EntrySignal(b, price);
+                        if (strongDelta) {
+                            signal = new EntrySignal(b, price);
+                        } else {
+                            skipOnce(b, price, "FAST_ENTRY_WEAK_DELTA", deltaRatio, nowMs);
+                        }
                     }
                     b.retestStartMs = 0;
                     b.retestExtreme = Double.NaN;
