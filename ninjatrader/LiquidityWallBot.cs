@@ -66,13 +66,14 @@ namespace NinjaTrader.NinjaScript.Strategies
             private readonly string safeAlias;
             private StreamWriter writer;
             private string openDay;
+            private bool opened;
+            private readonly List<string> pending = new List<string>();
 
             public BlackBox(string alias)
             {
                 safeAlias = System.Text.RegularExpressions.Regex.Replace(
                     alias ?? "unknown", "[^a-zA-Z0-9._-]", "_");
                 dir = Path.Combine(Core.Globals.UserDataDir, "liquidity-wall-bot", "logs");
-                OpenForDay(DayKey(DateTime.UtcNow));
             }
 
             private static string DayKey(DateTime utc)
@@ -96,31 +97,69 @@ namespace NinjaTrader.NinjaScript.Strategies
                 }
             }
 
+            // Startup/shutdown records (INIT, SETTINGS, STOP) carry a wall-clock
+            // timestamp. They are buffered until the first data-driven record so
+            // that in Playback they land in the replayed day's file instead of
+            // creating an extra file named with today's date.
+            public void LogStartup(long nowMs, string type, params object[] kv)
+            {
+                string line = Serialize(nowMs, type, kv);
+                lock (this)
+                {
+                    if (opened && writer != null)
+                    {
+                        try { writer.WriteLine(line); } catch (Exception) { }
+                    }
+                    else
+                    {
+                        pending.Add(line);
+                    }
+                }
+            }
+
             public void Log(long nowMs, string type, params object[] kv)
             {
                 string day = DayKey(DateTimeOffset.FromUnixTimeMilliseconds(nowMs).UtcDateTime);
+                string line = Serialize(nowMs, type, kv);
                 lock (this)
                 {
-                    if (day != openDay)
+                    if (!opened || day != openDay)
                     {
-                        Close();
+                        if (opened) { CloseWriter(); }
                         OpenForDay(day);
+                        opened = true;
+                        FlushPending();
                     }
                     if (writer == null)
                     {
                         return;
                     }
-                    var sb = new StringBuilder(160);
-                    sb.Append("{\"dataTime\":").Append(nowMs)
-                      .Append(",\"type\":\"").Append(type).Append('"');
-                    for (int i = 0; i + 1 < kv.Length; i += 2)
-                    {
-                        sb.Append(",\"").Append(kv[i]).Append("\":");
-                        AppendValue(sb, kv[i + 1]);
-                    }
-                    sb.Append('}');
-                    try { writer.WriteLine(sb.ToString()); } catch (Exception) { }
+                    try { writer.WriteLine(line); } catch (Exception) { }
                 }
+            }
+
+            private void FlushPending()
+            {
+                if (writer == null) { pending.Clear(); return; }
+                foreach (string p in pending)
+                {
+                    try { writer.WriteLine(p); } catch (Exception) { }
+                }
+                pending.Clear();
+            }
+
+            private static string Serialize(long nowMs, string type, object[] kv)
+            {
+                var sb = new StringBuilder(160);
+                sb.Append("{\"dataTime\":").Append(nowMs)
+                  .Append(",\"type\":\"").Append(type).Append('"');
+                for (int i = 0; i + 1 < kv.Length; i += 2)
+                {
+                    sb.Append(",\"").Append(kv[i]).Append("\":");
+                    AppendValue(sb, kv[i + 1]);
+                }
+                sb.Append('}');
+                return sb.ToString();
             }
 
             private static void AppendValue(StringBuilder sb, object v)
@@ -146,10 +185,23 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 lock (this)
                 {
-                    try { if (writer != null) { writer.Flush(); writer.Dispose(); } }
-                    catch (Exception) { }
-                    writer = null;
+                    if (!opened && pending.Count > 0)
+                    {
+                        // No data ever arrived (e.g. strategy enabled without a
+                        // feed): keep the startup records in a wall-clock file.
+                        OpenForDay(DayKey(DateTime.UtcNow));
+                        opened = true;
+                        FlushPending();
+                    }
+                    CloseWriter();
                 }
+            }
+
+            private void CloseWriter()
+            {
+                try { if (writer != null) { writer.Flush(); writer.Dispose(); } }
+                catch (Exception) { }
+                writer = null;
             }
         }
 
@@ -559,6 +611,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             public bool Reconfirm;
             public int TradesTaken;
             public long LastFastSkipMs;
+            public long LastDeferLogMs;
 
             public double Center() { return (Low + High) / 2.0; }
         }
@@ -697,6 +750,19 @@ namespace NinjaTrader.NinjaScript.Strategies
                             && price <= b.High + o.ObEntryToleranceDollars;
                     if (b.LeftZone && inside && signal == null)
                     {
+                        if (o.ObCounterTrendGuardEnabled && o.IsCounterTrend(b.Side))
+                        {
+                            // Adaptive regime guard: while recent drift runs hard
+                            // against the block's side, defer the touch entry. The
+                            // block stays alive and trades normally once the drift
+                            // fades or turns.
+                            if (nowMs - b.LastDeferLogMs >= 30000)
+                            {
+                                b.LastDeferLogMs = nowMs;
+                                o.LogObEntryDeferred(b, price, nowMs);
+                            }
+                            continue;
+                        }
                         if (IsFastApproach(b))
                         {
                             if (nowMs - b.LastFastSkipMs >= o.ObApproachWindowMs)
@@ -1257,6 +1323,20 @@ namespace NinjaTrader.NinjaScript.Strategies
         [Display(Name = "OB reconfirm delta ratio", GroupName = "7. Order Blocks", Order = 22)]
         public double ObReconfirmDeltaRatio { get; set; }
 
+        [NinjaScriptProperty]
+        [Display(Name = "OB counter-trend guard enabled", GroupName = "8. Market Regime", Order = 0)]
+        public bool ObCounterTrendGuardEnabled { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0.1, double.MaxValue)]
+        [Display(Name = "Counter-trend drift threshold ($)", GroupName = "8. Market Regime", Order = 1)]
+        public double ObCounterTrendDriftDollars { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(60000, long.MaxValue)]
+        [Display(Name = "Regime window (ms)", GroupName = "8. Market Regime", Order = 2)]
+        public long RegimeWindowMs { get; set; }
+
         // =====================================================================
         // Lifecycle
         // =====================================================================
@@ -1352,6 +1432,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ObReconfirmMemoryMs = 7200000;
                 ObReconfirmDisplacementMult = 1.5;
                 ObReconfirmDeltaRatio = 0.45;
+
+                ObCounterTrendGuardEnabled = true;
+                ObCounterTrendDriftDollars = 3.0;
+                RegimeWindowMs = 600000;
             }
             else if (State == State.DataLoaded)
             {
@@ -1375,7 +1459,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 SetStopLoss(SignalOb, CalculationMode.Ticks, ObStopLossDollars / tickSize, false);
 
                 nowMs = ToMs(DateTime.UtcNow);
-                blackBox.Log(nowMs, "INIT",
+                blackBox.LogStartup(nowMs, "INIT",
                         "platform", "NinjaTrader8",
                         "instrument", Instrument.FullName,
                         "tickSize", tickSize,
@@ -1391,7 +1475,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 if (blackBox != null)
                 {
-                    blackBox.Log(ToMs(DateTime.UtcNow), "STOP");
+                    blackBox.LogStartup(ToMs(DateTime.UtcNow), "STOP");
                     blackBox.Close();
                     blackBox = null;
                 }
@@ -1412,7 +1496,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private void LogSettings()
         {
-            blackBox.Log(nowMs, "SETTINGS",
+            blackBox.LogStartup(nowMs, "SETTINGS",
                     "magnetMode", MagnetMode,
                     "wallMinSize", WallMinSize,
                     "wallDominanceRatio", WallDominanceRatio,
@@ -1429,7 +1513,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     "spoofFilterEnabled", SpoofFilterEnabled,
                     "reentryGuardEnabled", ReentryDeeperExtremeEnabled,
                     "revengeEnabled", RevengeEnabled);
-            blackBox.Log(nowMs, "OB_SETTINGS",
+            blackBox.LogStartup(nowMs, "OB_SETTINGS",
                     "obEnabled", ObEnabled,
                     "obMinZoneVolume", ObMinZoneVolume,
                     "obZoneTicks", ObZoneTicks,
@@ -1450,7 +1534,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                     "obReconfirmEnabled", ObReconfirmEnabled,
                     "obReconfirmMemoryMs", ObReconfirmMemoryMs,
                     "obReconfirmDisplacementMult", ObReconfirmDisplacementMult,
-                    "obReconfirmDeltaRatio", ObReconfirmDeltaRatio);
+                    "obReconfirmDeltaRatio", ObReconfirmDeltaRatio,
+                    "obCounterTrendGuardEnabled", ObCounterTrendGuardEnabled,
+                    "obCounterTrendDrift", ObCounterTrendDriftDollars,
+                    "regimeWindowMs", RegimeWindowMs);
         }
 
         // =====================================================================
@@ -1490,6 +1577,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             SessionGuardTick();
 
             lastTradePrice = e.Price;
+            RegimeTick(e.Price);
 
             // Aggressor from the trade price itself: at/above the ask = buyer
             // lifted the offer; at/below the bid = seller hit the bid. Trades
@@ -1581,6 +1669,76 @@ namespace NinjaTrader.NinjaScript.Strategies
         private bool EntriesAllowed()
         {
             return !sessionPaused;
+        }
+
+        // =====================================================================
+        // Market regime: rolling drift/range over the last RegimeWindowMs
+        // =====================================================================
+
+        private readonly List<long> regimeTimes = new List<long>();
+        private readonly List<double> regimePrices = new List<double>();
+        private long lastRegimeSampleMs;
+        private long lastRegimeLogMs;
+
+        private void RegimeTick(double price)
+        {
+            if (nowMs - lastRegimeSampleMs < 1000) { return; }
+            lastRegimeSampleMs = nowMs;
+            regimeTimes.Add(nowMs);
+            regimePrices.Add(price);
+            long horizon = nowMs - RegimeWindowMs;
+            int drop = 0;
+            while (drop < regimeTimes.Count && regimeTimes[drop] < horizon) { drop++; }
+            if (drop > 0)
+            {
+                regimeTimes.RemoveRange(0, drop);
+                regimePrices.RemoveRange(0, drop);
+            }
+            if (nowMs - lastRegimeLogMs >= 300000 && regimePrices.Count >= 2)
+            {
+                lastRegimeLogMs = nowMs;
+                blackBox.Log(nowMs, "REGIME",
+                        "drift", RegimeDrift(),
+                        "range", RegimeRange(),
+                        "samples", regimePrices.Count);
+            }
+        }
+
+        private double RegimeDrift()
+        {
+            if (regimePrices.Count < 2) { return 0; }
+            return regimePrices[regimePrices.Count - 1] - regimePrices[0];
+        }
+
+        private double RegimeRange()
+        {
+            if (regimePrices.Count < 2) { return 0; }
+            double min = double.MaxValue, max = double.MinValue;
+            for (int i = 0; i < regimePrices.Count; i++)
+            {
+                if (regimePrices[i] < min) { min = regimePrices[i]; }
+                if (regimePrices[i] > max) { max = regimePrices[i]; }
+            }
+            return max - min;
+        }
+
+        private bool IsCounterTrend(BotSide side)
+        {
+            double drift = RegimeDrift();
+            return side == BotSide.Long
+                    ? drift <= -ObCounterTrendDriftDollars
+                    : drift >= ObCounterTrendDriftDollars;
+        }
+
+        private void LogObEntryDeferred(ObBlock b, double price, long now)
+        {
+            blackBox.Log(now, "OB_ENTRY_DEFERRED",
+                    "blockId", b.Id,
+                    "side", b.Side.ToString(),
+                    "price", price,
+                    "drift", RegimeDrift(),
+                    "range", RegimeRange(),
+                    "reason", "COUNTER_TREND_DRIFT");
         }
 
         // =====================================================================

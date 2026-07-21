@@ -27,6 +27,11 @@ Bookmap add-on (logic base: v1.2.4) to NinjaTrader 8.
 - Both engines share one net position: only one trade may be open at a time.
 - Session guard: no new entries 20:30–22:00 UTC (23:30–01:00 Riyadh); memory
   is wiped at resume for the new session. Configurable in the parameters.
+- Market regime guard: the bot samples a rolling price window (default 10
+  min) and logs `REGIME` (drift + range). While drift runs hard against an
+  OB block's side (default $3), the touch entry is deferred
+  (`OB_ENTRY_DEFERRED`) — the block stays alive and trades once the drift
+  fades or turns.
 - BlackBox log: one JSONL file per UTC day, at
   `Documents\NinjaTrader 8\liquidity-wall-bot\logs\`. The date in the file
   name comes from the data's own timestamps, so in Playback the events are
