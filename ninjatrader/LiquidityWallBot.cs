@@ -612,6 +612,9 @@ namespace NinjaTrader.NinjaScript.Strategies
             public int TradesTaken;
             public long LastFastSkipMs;
             public long LastDeferLogMs;
+            public bool InZone;
+            public long TouchMs;
+            public double WorstExtreme;
 
             public double Center() { return (Low + High) / 2.0; }
         }
@@ -620,6 +623,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             public ObBlock Block;
             public double Price;
+            public string Mode;
         }
 
         private struct ObExec
@@ -748,40 +752,89 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                     bool inside = price >= b.Low - o.ObEntryToleranceDollars
                             && price <= b.High + o.ObEntryToleranceDollars;
-                    if (b.LeftZone && inside && signal == null)
+                    if (b.LeftZone && signal == null)
                     {
-                        if (o.ObCounterTrendGuardEnabled && o.IsCounterTrend(b.Side))
+                        if (inside)
                         {
-                            // Adaptive regime guard: while recent drift runs hard
-                            // against the block's side, defer the touch entry. The
-                            // block stays alive and trades normally once the drift
-                            // fades or turns.
-                            if (nowMs - b.LastDeferLogMs >= 30000)
+                            if (!b.InZone)
                             {
-                                b.LastDeferLogMs = nowMs;
-                                o.LogObEntryDeferred(b, price, nowMs);
+                                b.InZone = true;
+                                b.TouchMs = nowMs;
+                                b.WorstExtreme = price;
                             }
-                            continue;
+                            else if (b.Side == BotSide.Long
+                                    ? price < b.WorstExtreme
+                                    : price > b.WorstExtreme)
+                            {
+                                b.WorstExtreme = price;
+                            }
+                            if (Guarded(b, price, nowMs)) { continue; }
+                            if (!o.ObRetestConfirmEnabled)
+                            {
+                                signal = new ObSignal { Block = b, Price = price, Mode = "TOUCH" };
+                                continue;
+                            }
+                            // Dwell confirmation: price held inside the zone, stopped
+                            // making new adverse extremes, and rebounded toward profit.
+                            double mult = b.Reconfirm ? o.ObRetestReconfirmMult : 1.0;
+                            bool dwelled = nowMs - b.TouchMs >= (long)(o.ObRetestDwellMs * mult);
+                            bool rebounded = b.Side == BotSide.Long
+                                    ? price >= b.WorstExtreme + o.ObRetestReboundDollars * mult
+                                    : price <= b.WorstExtreme - o.ObRetestReboundDollars * mult;
+                            if (dwelled && rebounded)
+                            {
+                                signal = new ObSignal { Block = b, Price = price, Mode = "RETEST_DWELL" };
+                            }
                         }
-                        if (IsFastApproach(b))
+                        else if (b.InZone)
                         {
-                            if (nowMs - b.LastFastSkipMs >= o.ObApproachWindowMs)
-                            {
-                                b.LastFastSkipMs = nowMs;
-                                o.LogObEntrySkipped(b, price, ApproachMove(), nowMs);
-                            }
-                            continue;
+                            b.InZone = false;
+                            if (!o.ObRetestConfirmEnabled) { continue; }
+                            // Fast bounce: price touched the zone and left it on the
+                            // profit side - the rejection itself is the confirmation.
+                            bool profitExit = b.Side == BotSide.Long
+                                    ? price > b.High + o.ObEntryToleranceDollars
+                                    : price < b.Low - o.ObEntryToleranceDollars;
+                            if (!profitExit) { continue; }
+                            if (Guarded(b, price, nowMs)) { continue; }
+                            signal = new ObSignal { Block = b, Price = price, Mode = "FAST_BOUNCE" };
                         }
-                        signal = new ObSignal { Block = b, Price = price };
                     }
                 }
                 return signal;
+            }
+
+            private bool Guarded(ObBlock b, double price, long nowMs)
+            {
+                if (o.ObCounterTrendGuardEnabled && o.IsCounterTrend(b.Side))
+                {
+                    // Adaptive regime guard: while recent drift runs hard against
+                    // the block's side, defer the entry. The block stays alive and
+                    // trades normally once the drift fades or turns.
+                    if (nowMs - b.LastDeferLogMs >= 30000)
+                    {
+                        b.LastDeferLogMs = nowMs;
+                        o.LogObEntryDeferred(b, price, nowMs);
+                    }
+                    return true;
+                }
+                if (IsFastApproach(b))
+                {
+                    if (nowMs - b.LastFastSkipMs >= o.ObApproachWindowMs)
+                    {
+                        b.LastFastSkipMs = nowMs;
+                        o.LogObEntrySkipped(b, price, ApproachMove(), nowMs);
+                    }
+                    return true;
+                }
+                return false;
             }
 
             public void MarkTraded(ObBlock b)
             {
                 b.TradesTaken++;
                 b.LeftZone = false;
+                b.InZone = false;
             }
 
             private void ScanForZone(long nowMs)
@@ -946,6 +999,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         // --- unified position (one open trade across BOTH engines) ---
         private enum TradeState { Flat, Entering, Open }
         private string openEngine;               // SignalWall / SignalOb / SignalRevenge, or null
+        private string pendingObEntryMode;       // TOUCH / FAST_BOUNCE / RETEST_DWELL
         private TradeState tradeState = TradeState.Flat;
         private bool tradeIsShadow;
         private long tradeSeq;
@@ -1324,6 +1378,25 @@ namespace NinjaTrader.NinjaScript.Strategies
         public double ObReconfirmDeltaRatio { get; set; }
 
         [NinjaScriptProperty]
+        [Display(Name = "OB retest confirm enabled", GroupName = "7. Order Blocks", Order = 23)]
+        public bool ObRetestConfirmEnabled { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0, long.MaxValue)]
+        [Display(Name = "OB retest dwell (ms)", GroupName = "7. Order Blocks", Order = 24)]
+        public long ObRetestDwellMs { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0.0, double.MaxValue)]
+        [Display(Name = "OB retest rebound ($)", GroupName = "7. Order Blocks", Order = 25)]
+        public double ObRetestReboundDollars { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1.0, double.MaxValue)]
+        [Display(Name = "OB retest reconfirm mult", GroupName = "7. Order Blocks", Order = 26)]
+        public double ObRetestReconfirmMult { get; set; }
+
+        [NinjaScriptProperty]
         [Display(Name = "OB counter-trend guard enabled", GroupName = "8. Market Regime", Order = 0)]
         public bool ObCounterTrendGuardEnabled { get; set; }
 
@@ -1433,6 +1506,11 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ObReconfirmDisplacementMult = 1.5;
                 ObReconfirmDeltaRatio = 0.45;
 
+                ObRetestConfirmEnabled = true;
+                ObRetestDwellMs = 15000;
+                ObRetestReboundDollars = 0.75;
+                ObRetestReconfirmMult = 2.0;
+
                 ObCounterTrendGuardEnabled = true;
                 ObCounterTrendDriftDollars = 3.0;
                 RegimeWindowMs = 600000;
@@ -1535,6 +1613,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                     "obReconfirmMemoryMs", ObReconfirmMemoryMs,
                     "obReconfirmDisplacementMult", ObReconfirmDisplacementMult,
                     "obReconfirmDeltaRatio", ObReconfirmDeltaRatio,
+                    "obRetestConfirmEnabled", ObRetestConfirmEnabled,
+                    "obRetestDwellMs", ObRetestDwellMs,
+                    "obRetestRebound", ObRetestReboundDollars,
+                    "obRetestReconfirmMult", ObRetestReconfirmMult,
                     "obCounterTrendGuardEnabled", ObCounterTrendGuardEnabled,
                     "obCounterTrendDrift", ObCounterTrendDriftDollars,
                     "regimeWindowMs", RegimeWindowMs);
@@ -1927,6 +2009,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             ObSignal obSig = obEngine.OnPrice(price, nowMs);
             if (obSig != null && CanEnter(SignalOb))
             {
+                pendingObEntryMode = obSig.Mode;
                 if (OpenTrade(SignalOb, obSig.Block.Side, price, ObOrderSize,
                         ObTakeProfitDollars, ObStopLossDollars, obSig.Block, double.NaN, false))
                 {
@@ -2184,6 +2267,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 blackBox.Log(nowMs, "OB_ENTRY",
                         "obTradeId", currentTradeId,
                         "blockId", block.Id,
+                        "entryMode", pendingObEntryMode,
                         "side", side.ToString().ToUpperInvariant(),
                         "entryPrice", Round2(signalPrice),
                         "takeProfit", Round2(signalPrice + SignOf(side) * tpDollars),
