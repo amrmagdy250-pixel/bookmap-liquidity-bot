@@ -1464,10 +1464,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         protected override void OnMarketData(MarketDataEventArgs e)
         {
-            if (State == State.Historical)
+            if (State == State.Historical && Connection.PlaybackConnection == null)
             {
-                // Historical bar fill has no depth/tape; the bot only runs on
-                // live or Market Replay data (both arrive in Realtime state).
+                // Historical bar backfill has no depth/tape; the bot runs on
+                // live data and on Playback (Market Replay) data, which can
+                // arrive while the strategy is still in the Historical state.
                 return;
             }
             if (e.MarketDataType == MarketDataType.Bid)

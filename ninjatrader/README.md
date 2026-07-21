@@ -28,4 +28,6 @@ Bookmap add-on (logic base: v1.2.4) to NinjaTrader 8.
 - Session guard: no new entries 20:30–22:00 UTC (23:30–01:00 Riyadh); memory
   is wiped at resume for the new session. Configurable in the parameters.
 - BlackBox log: one JSONL file per UTC day, at
-  `Documents\NinjaTrader 8\liquidity-wall-bot\logs\`.
+  `Documents\NinjaTrader 8\liquidity-wall-bot\logs\`. The date in the file
+  name comes from the data's own timestamps, so in Playback the events are
+  written to a file named with the replayed day's date, not today's date.
