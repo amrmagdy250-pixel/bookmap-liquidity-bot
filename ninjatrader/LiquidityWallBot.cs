@@ -615,6 +615,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             public bool InZone;
             public long TouchMs;
             public double WorstExtreme;
+            public long LastCounterMs;
 
             public double Center() { return (Low + High) / 2.0; }
         }
@@ -806,17 +807,33 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             private bool Guarded(ObBlock b, double price, long nowMs)
             {
-                if (o.ObCounterTrendGuardEnabled && o.IsCounterTrend(b.Side))
+                if (o.ObCounterTrendGuardEnabled)
                 {
-                    // Adaptive regime guard: while recent drift runs hard against
-                    // the block's side, defer the entry. The block stays alive and
-                    // trades normally once the drift fades or turns.
-                    if (nowMs - b.LastDeferLogMs >= 30000)
+                    if (o.IsCounterTrend(b.Side))
                     {
-                        b.LastDeferLogMs = nowMs;
-                        o.LogObEntryDeferred(b, price, nowMs);
+                        // Adaptive regime guard: while recent drift runs hard against
+                        // the block's side, defer the entry. The block stays alive and
+                        // trades normally once the drift fades or turns.
+                        b.LastCounterMs = nowMs;
+                        if (nowMs - b.LastDeferLogMs >= 30000)
+                        {
+                            b.LastDeferLogMs = nowMs;
+                            o.LogObEntryDeferred(b, price, nowMs, "COUNTER_TREND_DRIFT");
+                        }
+                        return true;
                     }
-                    return true;
+                    if (b.LastCounterMs > 0 && nowMs - b.LastCounterMs < o.ObDriftCalmMs)
+                    {
+                        // The drift only just eased below the threshold; require it
+                        // to stay calm before entering, so a momentary dip in a
+                        // running move cannot slip a knife-edge entry through.
+                        if (nowMs - b.LastDeferLogMs >= 30000)
+                        {
+                            b.LastDeferLogMs = nowMs;
+                            o.LogObEntryDeferred(b, price, nowMs, "DRIFT_CALM_WAIT");
+                        }
+                        return true;
+                    }
                 }
                 if (IsFastApproach(b))
                 {
@@ -1416,6 +1433,11 @@ namespace NinjaTrader.NinjaScript.Strategies
         [Display(Name = "Regime window (ms)", GroupName = "8. Market Regime", Order = 2)]
         public long RegimeWindowMs { get; set; }
 
+        [NinjaScriptProperty]
+        [Range(0, long.MaxValue)]
+        [Display(Name = "Drift calm confirm (ms)", GroupName = "8. Market Regime", Order = 3)]
+        public long ObDriftCalmMs { get; set; }
+
         // =====================================================================
         // Lifecycle
         // =====================================================================
@@ -1520,6 +1542,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ObCounterTrendGuardEnabled = true;
                 ObCounterTrendDriftDollars = 3.0;
                 RegimeWindowMs = 600000;
+                ObDriftCalmMs = 60000;
             }
             else if (State == State.DataLoaded)
             {
@@ -1626,7 +1649,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                     "obRetestReconfirmMult", ObRetestReconfirmMult,
                     "obCounterTrendGuardEnabled", ObCounterTrendGuardEnabled,
                     "obCounterTrendDrift", ObCounterTrendDriftDollars,
-                    "regimeWindowMs", RegimeWindowMs);
+                    "regimeWindowMs", RegimeWindowMs,
+                    "obDriftCalmMs", ObDriftCalmMs);
         }
 
         // =====================================================================
@@ -1848,7 +1872,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     : drift >= ObCounterTrendDriftDollars;
         }
 
-        private void LogObEntryDeferred(ObBlock b, double price, long now)
+        private void LogObEntryDeferred(ObBlock b, double price, long now, string reason)
         {
             blackBox.Log(now, "OB_ENTRY_DEFERRED",
                     "blockId", b.Id,
@@ -1856,7 +1880,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     "price", price,
                     "drift", RegimeDrift(),
                     "range", RegimeRange(),
-                    "reason", "COUNTER_TREND_DRIFT");
+                    "reason", reason);
         }
 
         // =====================================================================
