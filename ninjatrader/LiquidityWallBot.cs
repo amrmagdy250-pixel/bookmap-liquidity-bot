@@ -1020,6 +1020,12 @@ namespace NinjaTrader.NinjaScript.Strategies
         private int obWins, obLosses;
         private double obNetPnl;
 
+        // per-session (day) stats for DAY_SUMMARY
+        private int dayWallWins, dayWallLosses, dayObWins, dayObLosses;
+        private double dayWallPnl, dayObPnl;
+        private readonly Dictionary<string, double[]> dayModeStats =
+                new Dictionary<string, double[]>(); // entryMode -> {count, wins, pnl}
+
         // session guard
         private bool sessionPaused;
         private string lastResetDay;
@@ -1553,6 +1559,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 if (blackBox != null)
                 {
+                    LogDaySummary();
                     blackBox.LogStartup(ToMs(DateTime.UtcNow), "STOP");
                     blackBox.Close();
                     blackBox = null;
@@ -1728,10 +1735,39 @@ namespace NinjaTrader.NinjaScript.Strategies
                 if (day != lastResetDay)
                 {
                     lastResetDay = day;
+                    LogDaySummary();
                     ResetMemoryForNewSession();
                     blackBox.Log(nowMs, "SESSION_RESET", "day", day);
                 }
             }
+        }
+
+        private void LogDaySummary()
+        {
+            int trades = dayWallWins + dayWallLosses + dayObWins + dayObLosses;
+            if (trades == 0) { return; }
+            blackBox.Log(nowMs, "DAY_SUMMARY",
+                    "trades", trades,
+                    "wins", dayWallWins + dayObWins,
+                    "losses", dayWallLosses + dayObLosses,
+                    "netPnlDollars", Round2(dayWallPnl + dayObPnl),
+                    "wallTrades", dayWallWins + dayWallLosses,
+                    "wallWins", dayWallWins,
+                    "wallPnlDollars", Round2(dayWallPnl),
+                    "obTrades", dayObWins + dayObLosses,
+                    "obWins", dayObWins,
+                    "obPnlDollars", Round2(dayObPnl));
+            foreach (var kv in dayModeStats)
+            {
+                blackBox.Log(nowMs, "DAY_SUMMARY_MODE",
+                        "entryMode", kv.Key,
+                        "trades", (int)kv.Value[0],
+                        "wins", (int)kv.Value[1],
+                        "pnlDollars", Round2(kv.Value[2]));
+            }
+            dayWallWins = 0; dayWallLosses = 0; dayObWins = 0; dayObLosses = 0;
+            dayWallPnl = 0; dayObPnl = 0;
+            dayModeStats.Clear();
         }
 
         private void ResetMemoryForNewSession()
@@ -2348,6 +2384,18 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 if (win) { obWins++; } else { obLosses++; }
                 obNetPnl += pnlDollars;
+                if (win) { dayObWins++; } else { dayObLosses++; }
+                dayObPnl += pnlDollars;
+                string mode = pendingObEntryMode ?? "UNKNOWN";
+                double[] ms;
+                if (!dayModeStats.TryGetValue(mode, out ms))
+                {
+                    ms = new double[3];
+                    dayModeStats[mode] = ms;
+                }
+                ms[0]++;
+                if (win) { ms[1]++; }
+                ms[2] += pnlDollars;
                 blackBox.Log(nowMs, "OB_TRADE_CLOSED",
                         "obTradeId", currentTradeId,
                         "blockId", tradeBlock != null ? tradeBlock.Id : -1,
@@ -2367,6 +2415,8 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 if (win) { wallWins++; } else { wallLosses++; }
                 wallNetPnl += pnlDollars;
+                if (win) { dayWallWins++; } else { dayWallLosses++; }
+                dayWallPnl += pnlDollars;
                 blackBox.Log(nowMs, "TRADE_CLOSED",
                         "tradeId", currentTradeId,
                         "engine", openEngine,
