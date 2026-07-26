@@ -623,8 +623,12 @@ namespace NinjaTrader.NinjaScript.Strategies
         private sealed class ObSignal
         {
             public ObBlock Block;
+            public BotSide Side;
             public double Price;
             public string Mode;
+            public long Time;
+            public double BigPrintVolume;
+            public double BigPrintDelta;
         }
 
         private struct ObExec
@@ -652,6 +656,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             private readonly List<double[]> penalizedAreas = new List<double[]>(); // {low, high, expiry}
 
+            // OB Big Print (Order Flow Trade Detector equivalent): cluster of
+            // executions with a large total volume and dominant one-sided delta.
+            private readonly Queue<ObExec> bigPrintWindow = new Queue<ObExec>();
+            private long lastBigPrintMs;
+            private ObSignal pendingBigPrint;
+
             public OrderBlockEngine(LiquidityWallBot owner) { o = owner; }
 
             public List<ObBlock> ActiveBlocks { get { return blocks; } }
@@ -662,6 +672,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 blocks.Clear();
                 pricePath.Clear();
                 penalizedAreas.Clear();
+                bigPrintWindow.Clear();
+                pendingBigPrint = null;
+                lastBigPrintMs = 0;
                 lastRejectLevel = long.MinValue;
             }
 
@@ -685,6 +698,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     lastZoneScanMs = nowMs;
                     ScanForZone(nowMs);
                 }
+                TrackBigPrint(price, size, buyAggressor, nowMs);
             }
 
             public ObSignal OnPrice(double price, long nowMs)
@@ -772,7 +786,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                             if (Guarded(b, price, nowMs)) { continue; }
                             if (!o.ObRetestConfirmEnabled)
                             {
-                                signal = new ObSignal { Block = b, Price = price, Mode = "TOUCH" };
+                                signal = new ObSignal { Block = b, Side = b.Side, Price = price, Mode = "TOUCH", Time = nowMs };
                                 continue;
                             }
                             // Dwell confirmation: price held inside the zone, stopped
@@ -784,7 +798,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                                     : price <= b.WorstExtreme - o.ObRetestReboundDollars * mult;
                             if (dwelled && rebounded)
                             {
-                                signal = new ObSignal { Block = b, Price = price, Mode = "RETEST_DWELL" };
+                                signal = new ObSignal { Block = b, Side = b.Side, Price = price, Mode = "RETEST_DWELL", Time = nowMs };
                             }
                         }
                         else if (b.InZone)
@@ -798,9 +812,13 @@ namespace NinjaTrader.NinjaScript.Strategies
                                     : price < b.Low - o.ObEntryToleranceDollars;
                             if (!profitExit) { continue; }
                             if (Guarded(b, price, nowMs)) { continue; }
-                            signal = new ObSignal { Block = b, Price = price, Mode = "FAST_BOUNCE" };
+                            signal = new ObSignal { Block = b, Side = b.Side, Price = price, Mode = "FAST_BOUNCE", Time = nowMs };
                         }
                     }
+                }
+                if (signal == null)
+                {
+                    signal = TryBigPrint(price, nowMs);
                 }
                 return signal;
             }
@@ -976,6 +994,67 @@ namespace NinjaTrader.NinjaScript.Strategies
                 }
                 return hit;
             }
+
+            /** Big Print detector. Adds incoming executions to a short window and,
+             *  when the window reaches a minimum total volume with a dominant
+             *  one-sided delta, raises an OB signal with no block (entryMode BIGPRINT).
+             *  This mirrors the "Order Flow Trade Detector" large-circle events. */
+            private void TrackBigPrint(double price, long size, bool buyAggressor, long nowMs)
+            {
+                if (!o.ObBigPrintEnabled) { return; }
+                bigPrintWindow.Enqueue(new ObExec
+                {
+                    Price = price,
+                    Size = size,
+                    DeltaSign = buyAggressor ? 1 : -1,
+                    Time = nowMs
+                });
+                long horizon = nowMs - o.ObBigPrintWindowMs;
+                while (bigPrintWindow.Count > 0 && bigPrintWindow.Peek().Time < horizon)
+                {
+                    bigPrintWindow.Dequeue();
+                }
+                if (pendingBigPrint != null) { return; }
+                if (nowMs - lastBigPrintMs < o.ObBigPrintCooldownMs) { return; }
+
+                double volume = 0;
+                double delta = 0;
+                double lastPrice = price;
+                foreach (var e in bigPrintWindow)
+                {
+                    volume += e.Size;
+                    delta += e.Size * e.DeltaSign;
+                    lastPrice = e.Price;
+                }
+                if (volume < o.ObBigPrintMinVolume) { return; }
+                double ratio = Math.Abs(delta) / volume;
+                if (ratio < o.ObBigPrintMinDeltaRatio) { return; }
+
+                BotSide side = delta > 0 ? BotSide.Long : BotSide.Short;
+                pendingBigPrint = new ObSignal
+                {
+                    Block = null,
+                    Side = side,
+                    Price = lastPrice,
+                    Mode = "BIGPRINT",
+                    Time = nowMs,
+                    BigPrintVolume = volume,
+                    BigPrintDelta = delta
+                };
+                lastBigPrintMs = nowMs;
+            }
+
+            private ObSignal TryBigPrint(double price, long nowMs)
+            {
+                if (!o.ObBigPrintEnabled || pendingBigPrint == null) { return null; }
+                if (nowMs - pendingBigPrint.Time > o.ObBigPrintWindowMs) { pendingBigPrint = null; return null; }
+                if (Math.Abs(price - pendingBigPrint.Price) > o.ObBigPrintMaxDistanceDollars) { pendingBigPrint = null; return null; }
+                if (o.ObCounterTrendGuardEnabled && o.IsCounterTrend(pendingBigPrint.Side)) { pendingBigPrint = null; return null; }
+
+                ObSignal s = pendingBigPrint;
+                pendingBigPrint = null;
+                return s;
+            }
         }
 
         // =====================================================================
@@ -1016,7 +1095,9 @@ namespace NinjaTrader.NinjaScript.Strategies
         // --- unified position (one open trade across BOTH engines) ---
         private enum TradeState { Flat, Entering, Open }
         private string openEngine;               // SignalWall / SignalOb / SignalRevenge, or null
-        private string pendingObEntryMode;       // TOUCH / FAST_BOUNCE / RETEST_DWELL
+        private string pendingObEntryMode;       // TOUCH / FAST_BOUNCE / RETEST_DWELL / BIGPRINT
+        private double obBigPrintVolume;         // set by BIGPRINT signals (block == null)
+        private double obBigPrintDelta;
         private TradeState tradeState = TradeState.Flat;
         private bool tradeIsShadow;
         private long tradeSeq;
@@ -1470,6 +1551,36 @@ namespace NinjaTrader.NinjaScript.Strategies
         [Display(Name = "OB trailing profit cap ($)", GroupName = "9. OB Trailing Stop", Order = 5)]
         public double ObTrailingProfitCapDollars { get; set; }
 
+        // --- OB big print (Order Flow Trade Detector equivalent) ---
+        [NinjaScriptProperty]
+        [Display(Name = "OB big print enabled", GroupName = "10. OB Big Print", Order = 0)]
+        public bool ObBigPrintEnabled { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, int.MaxValue)]
+        [Display(Name = "Big print min volume", GroupName = "10. OB Big Print", Order = 1)]
+        public int ObBigPrintMinVolume { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0.0, 1.0)]
+        [Display(Name = "Big print min delta ratio", GroupName = "10. OB Big Print", Order = 2)]
+        public double ObBigPrintMinDeltaRatio { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(100, long.MaxValue)]
+        [Display(Name = "Big print window (ms)", GroupName = "10. OB Big Print", Order = 3)]
+        public long ObBigPrintWindowMs { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0, long.MaxValue)]
+        [Display(Name = "Big print cooldown (ms)", GroupName = "10. OB Big Print", Order = 4)]
+        public long ObBigPrintCooldownMs { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0.0, double.MaxValue)]
+        [Display(Name = "Big print max entry distance ($)", GroupName = "10. OB Big Print", Order = 5)]
+        public double ObBigPrintMaxDistanceDollars { get; set; }
+
         // =====================================================================
         // Lifecycle
         // =====================================================================
@@ -1582,6 +1693,13 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ObTrailingKickInDollars = 6.0;
                 ObTrailingDistanceDollars = 2.0;
                 ObTrailingProfitCapDollars = 50.0;
+
+                ObBigPrintEnabled = false;
+                ObBigPrintMinVolume = 100;
+                ObBigPrintMinDeltaRatio = 0.70;
+                ObBigPrintWindowMs = 1000;
+                ObBigPrintCooldownMs = 60000;
+                ObBigPrintMaxDistanceDollars = 1.0;
             }
             else if (State == State.DataLoaded)
             {
@@ -1696,6 +1814,13 @@ namespace NinjaTrader.NinjaScript.Strategies
                     "obTrailingKickIn", ObTrailingKickInDollars,
                     "obTrailingDistance", ObTrailingDistanceDollars,
                     "obTrailingProfitCap", ObTrailingProfitCapDollars);
+            blackBox.LogStartup(nowMs, "OB_BIGPRINT_SETTINGS",
+                    "obBigPrintEnabled", ObBigPrintEnabled,
+                    "obBigPrintMinVolume", ObBigPrintMinVolume,
+                    "obBigPrintMinDeltaRatio", ObBigPrintMinDeltaRatio,
+                    "obBigPrintWindowMs", ObBigPrintWindowMs,
+                    "obBigPrintCooldownMs", ObBigPrintCooldownMs,
+                    "obBigPrintMaxDistance", ObBigPrintMaxDistanceDollars);
         }
 
         // =====================================================================
@@ -2112,16 +2237,23 @@ namespace NinjaTrader.NinjaScript.Strategies
             // Shadow-mode TP/SL management (live mode is bracket-managed).
             ShadowManage(price);
 
-            // Order-block engine.
+            // Order-block engine (+ BIGPRINT signals from the tape).
             ObSignal obSig = obEngine.OnPrice(price, nowMs);
             if (obSig != null && CanEnter(SignalOb))
             {
                 pendingObEntryMode = obSig.Mode;
-                if (OpenTrade(SignalOb, obSig.Block.Side, price, ObOrderSize,
+                obBigPrintVolume = obSig.BigPrintVolume;
+                obBigPrintDelta = obSig.BigPrintDelta;
+                if (OpenTrade(SignalOb, obSig.Side, price, ObOrderSize,
                         ObTakeProfitDollars, ObStopLossDollars, obSig.Block, double.NaN, false))
                 {
-                    obEngine.MarkTraded(obSig.Block);
+                    if (obSig.Block != null)
+                    {
+                        obEngine.MarkTraded(obSig.Block);
+                    }
                 }
+                obBigPrintVolume = 0;
+                obBigPrintDelta = 0;
             }
 
             if (!WallStrategyEnabled || tradeState != TradeState.Flat) { return; }
@@ -2369,21 +2501,27 @@ namespace NinjaTrader.NinjaScript.Strategies
             tradeWallPrice = wallPrice;
             tradeIsRevenge = isRevenge;
 
-            if (engine == SignalOb && block != null)
+            if (engine == SignalOb)
             {
+                int blockId = block != null ? (int)block.Id : -1;
+                double blockLow = block != null ? block.Low : 0;
+                double blockHigh = block != null ? block.High : 0;
+                double blockVolume = block != null ? block.Volume : obBigPrintVolume;
+                double blockDelta = block != null ? block.Delta : obBigPrintDelta;
+                bool reconfirm = block != null && block.Reconfirm;
                 blackBox.Log(nowMs, "OB_ENTRY",
                         "obTradeId", currentTradeId,
-                        "blockId", block.Id,
+                        "blockId", blockId,
                         "entryMode", pendingObEntryMode,
                         "side", side.ToString().ToUpperInvariant(),
                         "entryPrice", Round2(signalPrice),
                         "takeProfit", Round2(signalPrice + SignOf(side) * tpDollars),
                         "stopLoss", Round2(signalPrice - SignOf(side) * slDollars),
-                        "blockLow", Round2(block.Low),
-                        "blockHigh", Round2(block.High),
-                        "blockVolume", block.Volume,
-                        "blockDelta", block.Delta,
-                        "reconfirm", block.Reconfirm,
+                        "blockLow", Round2(blockLow),
+                        "blockHigh", Round2(blockHigh),
+                        "blockVolume", blockVolume,
+                        "blockDelta", blockDelta,
+                        "reconfirm", reconfirm,
                         "shadow", tradeIsShadow);
             }
             else if (isRevenge)
