@@ -629,6 +629,8 @@ namespace NinjaTrader.NinjaScript.Strategies
             public long Time;
             public double BigPrintVolume;
             public double BigPrintDelta;
+            public bool BigPrintSweep;
+            public double BigPrintSweepMeasure;
         }
 
         private struct ObExec
@@ -1059,6 +1061,12 @@ namespace NinjaTrader.NinjaScript.Strategies
                 }
 
                 BotSide side = delta > 0 ? BotSide.Long : BotSide.Short;
+                bool sweep = false;
+                double sweepMeasure = double.NaN;
+                if (o.ObBigPrintSweepEnabled)
+                {
+                    sweep = HasLiquiditySweep(side, lastPrice, nowMs, out sweepMeasure);
+                }
                 pendingBigPrint = new ObSignal
                 {
                     Block = null,
@@ -1067,7 +1075,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                     Mode = "BIGPRINT",
                     Time = nowMs,
                     BigPrintVolume = volume,
-                    BigPrintDelta = delta
+                    BigPrintDelta = delta,
+                    BigPrintSweep = sweep,
+                    BigPrintSweepMeasure = sweepMeasure
                 };
                 lastBigPrintMs = nowMs;
                 o.blackBox.Log(nowMs, "BIGPRINT_CANDIDATE",
@@ -1075,7 +1085,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                         "price", Round2(lastPrice),
                         "volume", volume,
                         "delta", delta,
-                        "ratio", Round2(ratio));
+                        "ratio", Round2(ratio),
+                        "sweep", sweep,
+                        "sweepMeasure", Round2(sweepMeasure));
             }
 
             private void RejectBigPrint(string reason, double price, long nowMs,
@@ -1110,8 +1122,9 @@ namespace NinjaTrader.NinjaScript.Strategies
              *  direction of the pending BigPrint. For a long print we need a recent
              *  high at least [pullback] above current price; for a short print a
              *  recent low at least [pullback] below. This mirrors SMC liquidity grabs. */
-            private bool HasLiquiditySweep(BotSide side, double price, long nowMs)
+            private bool HasLiquiditySweep(BotSide side, double price, long nowMs, out double measure)
             {
+                measure = 0;
                 if (sweepPath == null || sweepPath.Count == 0) { return false; }
                 double low = double.MaxValue;
                 double high = double.MinValue;
@@ -1120,11 +1133,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                     if (kv.Value < low) { low = kv.Value; }
                     if (kv.Value > high) { high = kv.Value; }
                 }
-                if (side == BotSide.Long)
-                {
-                    return high - price >= o.ObBigPrintSweepPullbackDollars;
-                }
-                return price - low >= o.ObBigPrintSweepPullbackDollars;
+                measure = side == BotSide.Long
+                        ? high - price
+                        : price - low;
+                return measure >= o.ObBigPrintSweepPullbackDollars;
             }
 
             private ObSignal TryBigPrint(double price, long nowMs)
@@ -1145,27 +1157,17 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                 // Liquidity-sweep confirmation from the second chart image: the
                 // BigPrint must come after a recent price extreme has been swept.
-                bool sweep = false;
-                if (o.ObBigPrintSweepEnabled)
+                // The sweep was computed at the moment the print was detected
+                // (before the current tick is added to the path, so it captures
+                // the actual liquidity grab rather than a moving extreme).
+                if (o.ObBigPrintSweepEnabled && !pendingBigPrint.BigPrintSweep)
                 {
-                    sweep = HasLiquiditySweep(side, price, nowMs);
-                    if (!sweep)
-                    {
-                        double low = double.MaxValue, high = double.MinValue;
-                        foreach (var kv in sweepPath)
-                        {
-                            if (kv.Value < low) { low = kv.Value; }
-                            if (kv.Value > high) { high = kv.Value; }
-                        }
-                        double measure = side == BotSide.Long
-                                ? high - price
-                                : price - low;
-                        RejectBigPrint("NO_SWEEP", price, nowMs, measure);
-                        return null;
-                    }
+                    RejectBigPrint("NO_SWEEP", price, nowMs,
+                            pendingBigPrint.BigPrintSweepMeasure);
+                    return null;
                 }
 
-                if (o.ObCounterTrendGuardEnabled && !sweep && o.IsCounterTrend(side))
+                if (o.ObCounterTrendGuardEnabled && !pendingBigPrint.BigPrintSweep && o.IsCounterTrend(side))
                 {
                     RejectBigPrint("COUNTER_TREND", price, nowMs);
                     return null;
