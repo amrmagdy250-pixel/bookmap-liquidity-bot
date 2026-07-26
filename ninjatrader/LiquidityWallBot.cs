@@ -662,6 +662,11 @@ namespace NinjaTrader.NinjaScript.Strategies
             private long lastBigPrintMs;
             private ObSignal pendingBigPrint;
 
+            // Liquidity sweep memory for BigPrint confirmation (SMC): recent
+            // price extremes so a BigPrint only triggers near a swept high/low.
+            private readonly Queue<KeyValuePair<long, double>> sweepPath =
+                    new Queue<KeyValuePair<long, double>>();
+
             public OrderBlockEngine(LiquidityWallBot owner) { o = owner; }
 
             public List<ObBlock> ActiveBlocks { get { return blocks; } }
@@ -671,6 +676,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 recentExecs.Clear();
                 blocks.Clear();
                 pricePath.Clear();
+                sweepPath.Clear();
                 penalizedAreas.Clear();
                 bigPrintWindow.Clear();
                 pendingBigPrint = null;
@@ -960,6 +966,13 @@ namespace NinjaTrader.NinjaScript.Strategies
                 {
                     pricePath.Dequeue();
                 }
+
+                sweepPath.Enqueue(new KeyValuePair<long, double>(nowMs, price));
+                long sweepHorizon = nowMs - o.ObBigPrintSweepWindowMs;
+                while (sweepPath.Count > 0 && sweepPath.Peek().Key < sweepHorizon)
+                {
+                    sweepPath.Dequeue();
+                }
             }
 
             private double ApproachMove()
@@ -1065,17 +1078,53 @@ namespace NinjaTrader.NinjaScript.Strategies
                         "ratio", Round2(ratio));
             }
 
-            private void RejectBigPrint(string reason, double price, long nowMs)
+            private void RejectBigPrint(string reason, double price, long nowMs,
+                    double sweepMeasure = double.NaN)
             {
                 if (o.blackBox == null) { return; }
-                o.blackBox.Log(nowMs, "BIGPRINT_REJECTED",
-                        "side", pendingBigPrint.Side.ToString().ToUpperInvariant(),
-                        "price", Round2(pendingBigPrint.Price),
-                        "lastPrice", Round2(price),
-                        "volume", pendingBigPrint.BigPrintVolume,
-                        "delta", pendingBigPrint.BigPrintDelta,
-                        "reason", reason);
+                if (double.IsNaN(sweepMeasure))
+                {
+                    o.blackBox.Log(nowMs, "BIGPRINT_REJECTED",
+                            "side", pendingBigPrint.Side.ToString().ToUpperInvariant(),
+                            "price", Round2(pendingBigPrint.Price),
+                            "lastPrice", Round2(price),
+                            "volume", pendingBigPrint.BigPrintVolume,
+                            "delta", pendingBigPrint.BigPrintDelta,
+                            "reason", reason);
+                }
+                else
+                {
+                    o.blackBox.Log(nowMs, "BIGPRINT_REJECTED",
+                            "side", pendingBigPrint.Side.ToString().ToUpperInvariant(),
+                            "price", Round2(pendingBigPrint.Price),
+                            "lastPrice", Round2(price),
+                            "volume", pendingBigPrint.BigPrintVolume,
+                            "delta", pendingBigPrint.BigPrintDelta,
+                            "reason", reason,
+                            "sweepMeasure", Round2(sweepMeasure));
+                }
                 pendingBigPrint = null;
+            }
+
+            /** Checks whether the current price has swept a liquidity extreme in the
+             *  direction of the pending BigPrint. For a long print we need a recent
+             *  high at least [pullback] above current price; for a short print a
+             *  recent low at least [pullback] below. This mirrors SMC liquidity grabs. */
+            private bool HasLiquiditySweep(BotSide side, double price, long nowMs)
+            {
+                if (sweepPath == null || sweepPath.Count == 0) { return false; }
+                double low = double.MaxValue;
+                double high = double.MinValue;
+                foreach (var kv in sweepPath)
+                {
+                    if (kv.Value < low) { low = kv.Value; }
+                    if (kv.Value > high) { high = kv.Value; }
+                }
+                if (side == BotSide.Long)
+                {
+                    return high - price >= o.ObBigPrintSweepPullbackDollars;
+                }
+                return price - low >= o.ObBigPrintSweepPullbackDollars;
             }
 
             private ObSignal TryBigPrint(double price, long nowMs)
@@ -1091,7 +1140,32 @@ namespace NinjaTrader.NinjaScript.Strategies
                     RejectBigPrint("TOO_FAR", price, nowMs);
                     return null;
                 }
-                if (o.ObCounterTrendGuardEnabled && o.IsCounterTrend(pendingBigPrint.Side))
+
+                BotSide side = pendingBigPrint.Side;
+
+                // Liquidity-sweep confirmation from the second chart image: the
+                // BigPrint must come after a recent price extreme has been swept.
+                bool sweep = false;
+                if (o.ObBigPrintSweepEnabled)
+                {
+                    sweep = HasLiquiditySweep(side, price, nowMs);
+                    if (!sweep)
+                    {
+                        double low = double.MaxValue, high = double.MinValue;
+                        foreach (var kv in sweepPath)
+                        {
+                            if (kv.Value < low) { low = kv.Value; }
+                            if (kv.Value > high) { high = kv.Value; }
+                        }
+                        double measure = side == BotSide.Long
+                                ? high - price
+                                : price - low;
+                        RejectBigPrint("NO_SWEEP", price, nowMs, measure);
+                        return null;
+                    }
+                }
+
+                if (o.ObCounterTrendGuardEnabled && !sweep && o.IsCounterTrend(side))
                 {
                     RejectBigPrint("COUNTER_TREND", price, nowMs);
                     return null;
@@ -1099,7 +1173,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                 // Enter only on a tick that continues in the print's direction,
                 // never on an immediate pullback that would put us on the wrong side.
-                BotSide side = pendingBigPrint.Side;
                 bool favorable = side == BotSide.Long
                         ? price >= pendingBigPrint.Price
                         : price <= pendingBigPrint.Price;
@@ -1635,6 +1708,20 @@ namespace NinjaTrader.NinjaScript.Strategies
         [Display(Name = "Big print max entry distance ($)", GroupName = "10. OB Big Print", Order = 5)]
         public double ObBigPrintMaxDistanceDollars { get; set; }
 
+        [NinjaScriptProperty]
+        [Display(Name = "Big print liquidity sweep", GroupName = "10. OB Big Print", Order = 6)]
+        public bool ObBigPrintSweepEnabled { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(100, long.MaxValue)]
+        [Display(Name = "Sweep lookback (ms)", GroupName = "10. OB Big Print", Order = 7)]
+        public long ObBigPrintSweepWindowMs { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0.01, double.MaxValue)]
+        [Display(Name = "Sweep min pullback ($)", GroupName = "10. OB Big Print", Order = 8)]
+        public double ObBigPrintSweepPullbackDollars { get; set; }
+
         // =====================================================================
         // Lifecycle
         // =====================================================================
@@ -1749,11 +1836,14 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ObTrailingProfitCapDollars = 50.0;
 
                 ObBigPrintEnabled = false;
-                ObBigPrintMinVolume = 100;
-                ObBigPrintMinDeltaRatio = 0.70;
+                ObBigPrintMinVolume = 60;
+                ObBigPrintMinDeltaRatio = 0.65;
                 ObBigPrintWindowMs = 1000;
                 ObBigPrintCooldownMs = 60000;
                 ObBigPrintMaxDistanceDollars = 1.0;
+                ObBigPrintSweepEnabled = true;
+                ObBigPrintSweepWindowMs = 30000;
+                ObBigPrintSweepPullbackDollars = 2.0;
             }
             else if (State == State.DataLoaded)
             {
@@ -1874,7 +1964,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                     "obBigPrintMinDeltaRatio", ObBigPrintMinDeltaRatio,
                     "obBigPrintWindowMs", ObBigPrintWindowMs,
                     "obBigPrintCooldownMs", ObBigPrintCooldownMs,
-                    "obBigPrintMaxDistance", ObBigPrintMaxDistanceDollars);
+                    "obBigPrintMaxDistance", ObBigPrintMaxDistanceDollars,
+                    "obBigPrintSweepEnabled", ObBigPrintSweepEnabled,
+                    "obBigPrintSweepWindowMs", ObBigPrintSweepWindowMs,
+                    "obBigPrintSweepPullback", ObBigPrintSweepPullbackDollars);
         }
 
         // =====================================================================
