@@ -1026,9 +1026,24 @@ namespace NinjaTrader.NinjaScript.Strategies
                     delta += e.Size * e.DeltaSign;
                     lastPrice = e.Price;
                 }
-                if (volume < o.ObBigPrintMinVolume) { return; }
+                if (volume < o.ObBigPrintMinVolume)
+                {
+                    if (volume >= o.ObBigPrintMinVolume * 0.5)
+                    {
+                        o.blackBox.Log(nowMs, "BIGPRINT_SKIP",
+                                "reason", "VOLUME_LOW", "volume", volume, "delta", delta,
+                                "price", Round2(lastPrice));
+                    }
+                    return;
+                }
                 double ratio = Math.Abs(delta) / volume;
-                if (ratio < o.ObBigPrintMinDeltaRatio) { return; }
+                if (ratio < o.ObBigPrintMinDeltaRatio)
+                {
+                    o.blackBox.Log(nowMs, "BIGPRINT_SKIP",
+                            "reason", "DELTA_RATIO", "volume", volume, "delta", delta,
+                            "ratio", Round2(ratio), "price", Round2(lastPrice));
+                    return;
+                }
 
                 BotSide side = delta > 0 ? BotSide.Long : BotSide.Short;
                 pendingBigPrint = new ObSignal
@@ -1042,14 +1057,53 @@ namespace NinjaTrader.NinjaScript.Strategies
                     BigPrintDelta = delta
                 };
                 lastBigPrintMs = nowMs;
+                o.blackBox.Log(nowMs, "BIGPRINT_CANDIDATE",
+                        "side", side.ToString().ToUpperInvariant(),
+                        "price", Round2(lastPrice),
+                        "volume", volume,
+                        "delta", delta,
+                        "ratio", Round2(ratio));
+            }
+
+            private void RejectBigPrint(string reason, double price, long nowMs)
+            {
+                if (o.blackBox == null) { return; }
+                o.blackBox.Log(nowMs, "BIGPRINT_REJECTED",
+                        "side", pendingBigPrint.Side.ToString().ToUpperInvariant(),
+                        "price", Round2(pendingBigPrint.Price),
+                        "lastPrice", Round2(price),
+                        "volume", pendingBigPrint.BigPrintVolume,
+                        "delta", pendingBigPrint.BigPrintDelta,
+                        "reason", reason);
+                pendingBigPrint = null;
             }
 
             private ObSignal TryBigPrint(double price, long nowMs)
             {
                 if (!o.ObBigPrintEnabled || pendingBigPrint == null) { return null; }
-                if (nowMs - pendingBigPrint.Time > o.ObBigPrintWindowMs) { pendingBigPrint = null; return null; }
-                if (Math.Abs(price - pendingBigPrint.Price) > o.ObBigPrintMaxDistanceDollars) { pendingBigPrint = null; return null; }
-                if (o.ObCounterTrendGuardEnabled && o.IsCounterTrend(pendingBigPrint.Side)) { pendingBigPrint = null; return null; }
+                if (nowMs - pendingBigPrint.Time > o.ObBigPrintWindowMs)
+                {
+                    RejectBigPrint("STALE", price, nowMs);
+                    return null;
+                }
+                if (Math.Abs(price - pendingBigPrint.Price) > o.ObBigPrintMaxDistanceDollars)
+                {
+                    RejectBigPrint("TOO_FAR", price, nowMs);
+                    return null;
+                }
+                if (o.ObCounterTrendGuardEnabled && o.IsCounterTrend(pendingBigPrint.Side))
+                {
+                    RejectBigPrint("COUNTER_TREND", price, nowMs);
+                    return null;
+                }
+
+                // Enter only on a tick that continues in the print's direction,
+                // never on an immediate pullback that would put us on the wrong side.
+                BotSide side = pendingBigPrint.Side;
+                bool favorable = side == BotSide.Long
+                        ? price >= pendingBigPrint.Price
+                        : price <= pendingBigPrint.Price;
+                if (!favorable) { return null; }
 
                 ObSignal s = pendingBigPrint;
                 pendingBigPrint = null;
