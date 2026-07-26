@@ -1028,6 +1028,9 @@ namespace NinjaTrader.NinjaScript.Strategies
         private double tradeWallPrice;
         private ObBlock tradeBlock;
         private bool tradeIsRevenge;
+        private double tradeFavorableExtreme;
+        private bool obTrailingLocked;
+        private bool obTrailingActive;
         private long wallCooldownUntil;
         private long obCooldownUntil;
 
@@ -1438,6 +1441,35 @@ namespace NinjaTrader.NinjaScript.Strategies
         [Display(Name = "Drift calm confirm (ms)", GroupName = "8. Market Regime", Order = 3)]
         public long ObDriftCalmMs { get; set; }
 
+        [NinjaScriptProperty]
+        [Display(Name = "OB trailing enabled", GroupName = "9. OB Trailing Stop", Order = 0)]
+        public bool ObTrailingEnabled { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0.0, double.MaxValue)]
+        [Display(Name = "OB trailing lock ($)", GroupName = "9. OB Trailing Stop", Order = 1)]
+        public double ObTrailingLockDollars { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0.0, double.MaxValue)]
+        [Display(Name = "OB trailing lock buffer ($)", GroupName = "9. OB Trailing Stop", Order = 2)]
+        public double ObTrailingLockBufferDollars { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0.0, double.MaxValue)]
+        [Display(Name = "OB trailing kick-in ($)", GroupName = "9. OB Trailing Stop", Order = 3)]
+        public double ObTrailingKickInDollars { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0.1, double.MaxValue)]
+        [Display(Name = "OB trailing distance ($)", GroupName = "9. OB Trailing Stop", Order = 4)]
+        public double ObTrailingDistanceDollars { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0.1, double.MaxValue)]
+        [Display(Name = "OB trailing profit cap ($)", GroupName = "9. OB Trailing Stop", Order = 5)]
+        public double ObTrailingProfitCapDollars { get; set; }
+
         // =====================================================================
         // Lifecycle
         // =====================================================================
@@ -1543,6 +1575,13 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ObCounterTrendDriftDollars = 3.0;
                 RegimeWindowMs = 600000;
                 ObDriftCalmMs = 60000;
+
+                ObTrailingEnabled = true;
+                ObTrailingLockDollars = 2.0;
+                ObTrailingLockBufferDollars = 0.5;
+                ObTrailingKickInDollars = 6.0;
+                ObTrailingDistanceDollars = 2.0;
+                ObTrailingProfitCapDollars = 50.0;
             }
             else if (State == State.DataLoaded)
             {
@@ -1650,7 +1689,13 @@ namespace NinjaTrader.NinjaScript.Strategies
                     "obCounterTrendGuardEnabled", ObCounterTrendGuardEnabled,
                     "obCounterTrendDrift", ObCounterTrendDriftDollars,
                     "regimeWindowMs", RegimeWindowMs,
-                    "obDriftCalmMs", ObDriftCalmMs);
+                    "obDriftCalmMs", ObDriftCalmMs,
+                    "obTrailingEnabled", ObTrailingEnabled,
+                    "obTrailingLock", ObTrailingLockDollars,
+                    "obTrailingLockBuffer", ObTrailingLockBufferDollars,
+                    "obTrailingKickIn", ObTrailingKickInDollars,
+                    "obTrailingDistance", ObTrailingDistanceDollars,
+                    "obTrailingProfitCap", ObTrailingProfitCapDollars);
         }
 
         // =====================================================================
@@ -2062,6 +2107,8 @@ namespace NinjaTrader.NinjaScript.Strategies
             SessionGuardTick();
             swings.OnPrice(price, nowMs);
 
+            UpdateObTrailing(price);
+
             // Shadow-mode TP/SL management (live mode is bracket-managed).
             ShadowManage(price);
 
@@ -2355,6 +2402,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 tradeEntryPrice = signalPrice;
                 tradeTp = signalPrice + SignOf(side) * tpDollars;
                 tradeSl = signalPrice - SignOf(side) * slDollars;
+                tradeFavorableExtreme = signalPrice;
+                obTrailingLocked = false;
+                obTrailingActive = false;
                 tradeState = TradeState.Open;
                 blackBox.Log(nowMs, "ENTRY_FILLED",
                         "tradeId", currentTradeId,
@@ -2374,6 +2424,87 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (side == BotSide.Long) { EnterLong(qty, engine); }
             else { EnterShort(qty, engine); }
             return true;
+        }
+
+        // =====================================================================
+        // Position / trade lifecycle helpers
+        // =====================================================================
+
+        /** OB trailing stop: two-tier lock. Tier 1 moves the stop to breakeven
+         *  (+ small buffer) once the trade is in profit. Tier 2 starts trailing
+         *  at a fixed distance from the most favorable price once a bigger move
+         *  is reached. Both tiers only ever tighten the stop, never loosen it. */
+        private void UpdateObTrailing(double price)
+        {
+            if (!ObTrailingEnabled || tradeState != TradeState.Open || openEngine != SignalOb)
+                return;
+            if (double.IsNaN(tradeEntryPrice) || double.IsNaN(tradeSl))
+                return;
+
+            if (tradeSide == BotSide.Long)
+                tradeFavorableExtreme = Math.Max(tradeFavorableExtreme, price);
+            else
+                tradeFavorableExtreme = Math.Min(tradeFavorableExtreme, price);
+
+            double profit = (tradeFavorableExtreme - tradeEntryPrice) * SignOf(tradeSide);
+            if (profit < 0) { profit = 0; }
+            double newStop = tradeSl;
+
+            // Tier 1: lock at breakeven + buffer once initial profit reached.
+            if (profit >= ObTrailingLockDollars && !obTrailingLocked && !obTrailingActive)
+            {
+                newStop = tradeEntryPrice + SignOf(tradeSide) * ObTrailingLockBufferDollars;
+            }
+
+            // Tier 2: trail at fixed distance from the favorable extreme.
+            if (profit >= ObTrailingKickInDollars)
+            {
+                double trailStop = tradeFavorableExtreme - SignOf(tradeSide) * ObTrailingDistanceDollars;
+                if (tradeSide == BotSide.Long)
+                    newStop = Math.Max(newStop, trailStop);
+                else
+                    newStop = Math.Min(newStop, trailStop);
+            }
+
+            bool canMove = tradeSide == BotSide.Long
+                    ? newStop > tradeSl + tickSize * 0.5
+                    : newStop < tradeSl - tickSize * 0.5;
+            if (!canMove) { return; }
+
+            tradeSl = Round2(newStop);
+
+            if (profit >= ObTrailingKickInDollars && !obTrailingActive)
+            {
+                obTrailingActive = true;
+                tradeTp = tradeEntryPrice + SignOf(tradeSide) * ObTrailingProfitCapDollars;
+                if (!tradeIsShadow)
+                {
+                    SetProfitTarget(SignalOb, CalculationMode.Price, tradeTp);
+                }
+                blackBox.Log(nowMs, "OB_TRAILING",
+                        "obTradeId", currentTradeId,
+                        "blockId", tradeBlock != null ? tradeBlock.Id : -1,
+                        "stage", "ACTIVE",
+                        "stop", tradeSl,
+                        "extreme", Round2(tradeFavorableExtreme),
+                        "profit", Round2(profit));
+            }
+            else if (profit >= ObTrailingLockDollars && !obTrailingLocked)
+            {
+                obTrailingLocked = true;
+                blackBox.Log(nowMs, "OB_TRAILING",
+                        "obTradeId", currentTradeId,
+                        "blockId", tradeBlock != null ? tradeBlock.Id : -1,
+                        "stage", "LOCK",
+                        "stop", tradeSl,
+                        "extreme", Round2(tradeFavorableExtreme),
+                        "profit", Round2(profit));
+            }
+
+            if (!tradeIsShadow)
+            {
+                SetStopLoss(SignalOb, CalculationMode.Price, tradeSl, false);
+            }
         }
 
         /** Shadow-mode TP/SL watcher; live exits are handled by real bracket orders. */
@@ -2505,6 +2636,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 double sl = openEngine == SignalOb ? ObStopLossDollars : StopLossDollars;
                 tradeTp = tradeEntryPrice + SignOf(tradeSide) * tp;
                 tradeSl = tradeEntryPrice - SignOf(tradeSide) * sl;
+                tradeFavorableExtreme = tradeEntryPrice;
+                obTrailingLocked = false;
+                obTrailingActive = false;
                 tradeState = TradeState.Open;
                 blackBox.Log(nowMs, "ENTRY_FILLED",
                         "tradeId", currentTradeId,
