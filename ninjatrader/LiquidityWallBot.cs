@@ -1155,18 +1155,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                 BotSide side = pendingBigPrint.Side;
 
-                // Liquidity-sweep confirmation from the second chart image: the
-                // BigPrint must come after a recent price extreme has been swept.
-                // The sweep was computed at the moment the print was detected
-                // (before the current tick is added to the path, so it captures
-                // the actual liquidity grab rather than a moving extreme).
-                if (o.ObBigPrintSweepEnabled && !pendingBigPrint.BigPrintSweep)
-                {
-                    RejectBigPrint("NO_SWEEP", price, nowMs,
-                            pendingBigPrint.BigPrintSweepMeasure);
-                    return null;
-                }
-
+                // Sweep is the SMC confirmation from the second chart image: if it
+                // happened, it overrides the counter-trend guard. A strong BigPrint
+                // that has not swept an extreme can still enter, as long as it is
+                // aligned with the current Regime drift.
                 if (o.ObCounterTrendGuardEnabled && !pendingBigPrint.BigPrintSweep && o.IsCounterTrend(side))
                 {
                     RejectBigPrint("COUNTER_TREND", price, nowMs);
@@ -1845,7 +1837,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ObBigPrintMaxDistanceDollars = 1.0;
                 ObBigPrintSweepEnabled = true;
                 ObBigPrintSweepWindowMs = 30000;
-                ObBigPrintSweepPullbackDollars = 2.0;
+                ObBigPrintSweepPullbackDollars = 1.0;
             }
             else if (State == State.DataLoaded)
             {
