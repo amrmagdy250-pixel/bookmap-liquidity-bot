@@ -870,6 +870,21 @@ namespace NinjaTrader.NinjaScript.Strategies
                     }
                     return true;
                 }
+                if (o.ObMaxTrendDriftDollars > 0)
+                {
+                    double drift = o.RegimeDrift();
+                    bool chasing = (b.Side == BotSide.Long && drift >= o.ObMaxTrendDriftDollars)
+                                 || (b.Side == BotSide.Short && drift <= -o.ObMaxTrendDriftDollars);
+                    if (chasing)
+                    {
+                        if (nowMs - b.LastDeferLogMs >= 30000)
+                        {
+                            b.LastDeferLogMs = nowMs;
+                            o.LogObEntryDeferred(b, price, nowMs, "TREND_CHASE");
+                        }
+                        return true;
+                    }
+                }
                 return false;
             }
 
@@ -1162,6 +1177,11 @@ namespace NinjaTrader.NinjaScript.Strategies
                 if (o.ObCounterTrendGuardEnabled && !pendingBigPrint.BigPrintSweep && o.IsCounterTrend(side))
                 {
                     RejectBigPrint("COUNTER_TREND", price, nowMs);
+                    return null;
+                }
+                if (o.ObMaxTrendDriftDollars > 0 && !pendingBigPrint.BigPrintSweep && o.IsTrendChase(side))
+                {
+                    RejectBigPrint("TREND_CHASE", price, nowMs);
                     return null;
                 }
 
@@ -1644,6 +1664,11 @@ namespace NinjaTrader.NinjaScript.Strategies
         public long ObDriftCalmMs { get; set; }
 
         [NinjaScriptProperty]
+        [Range(0.0, double.MaxValue)]
+        [Display(Name = "Max trend-chase drift ($)", GroupName = "8. Market Regime", Order = 4)]
+        public double ObMaxTrendDriftDollars { get; set; }
+
+        [NinjaScriptProperty]
         [Display(Name = "OB trailing enabled", GroupName = "9. OB Trailing Stop", Order = 0)]
         public bool ObTrailingEnabled { get; set; }
 
@@ -1821,6 +1846,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ObCounterTrendDriftDollars = 3.0;
                 RegimeWindowMs = 600000;
                 ObDriftCalmMs = 60000;
+                ObMaxTrendDriftDollars = 8.0;
 
                 ObTrailingEnabled = true;
                 ObTrailingLockDollars = 2.0;
@@ -1946,6 +1972,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     "obCounterTrendDrift", ObCounterTrendDriftDollars,
                     "regimeWindowMs", RegimeWindowMs,
                     "obDriftCalmMs", ObDriftCalmMs,
+                    "obMaxTrendChaseDrift", ObMaxTrendDriftDollars,
                     "obTrailingEnabled", ObTrailingEnabled,
                     "obTrailingLock", ObTrailingLockDollars,
                     "obTrailingLockBuffer", ObTrailingLockBufferDollars,
@@ -2181,6 +2208,14 @@ namespace NinjaTrader.NinjaScript.Strategies
             return side == BotSide.Long
                     ? drift <= -ObCounterTrendDriftDollars
                     : drift >= ObCounterTrendDriftDollars;
+        }
+
+        private bool IsTrendChase(BotSide side)
+        {
+            double drift = RegimeDrift();
+            return side == BotSide.Long
+                    ? drift >= ObMaxTrendDriftDollars
+                    : drift <= -ObMaxTrendDriftDollars;
         }
 
         private void LogObEntryDeferred(ObBlock b, double price, long now, string reason)
