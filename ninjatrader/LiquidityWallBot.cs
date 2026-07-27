@@ -639,6 +639,8 @@ namespace NinjaTrader.NinjaScript.Strategies
             public double BigPrintDelta;
             public bool BigPrintSweep;
             public double BigPrintSweepMeasure;
+            public double EntryScore;
+            public string EntryFlags;
         }
 
         private struct ObExec
@@ -860,6 +862,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 }
                 if (signal != null && !SignalAllowed(signal, price, nowMs))
                 {
+                    LogSignalRejected(signal, price, nowMs, "SCORE_LOW",
+                            signal.EntryScore, signal.EntryFlags);
                     signal = null;
                 }
                 if (signal == null)
@@ -1063,30 +1067,65 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return hit;
             }
 
-            /** Tape + DOM confirmation applied to every OB or BigPrint signal just
-             *  before the strategy opens a trade. For OBs, the filter values are
-             *  remembered while price is inside the zone; the first FastBounce or
-             *  Retest is allowed if a favourable signature was seen recently, which
-             *  removes the delay caused by waiting for the DOM/tape to still be
-             *  aligned exactly at the moment the bounce fires. */
+            /** Tape + DOM confirmation scoring. Hard gates are replaced by a score:
+             *  OB Confirmed / BigPrint is the base, then Absorption, Stacked
+             *  Imbalance, Sweep and BigPrint add points, bad absorption subtracts.
+             *  For OBs, recent confirmation memory still counts so the bounce does
+             *  not need the tape/DOM to be aligned exactly at entry time. */
             private bool SignalAllowed(ObSignal signal, double price, long nowMs)
             {
-                // OBs use confirmation memory; BigPrint (no block) uses live filters.
-                if (HasConfirmationMemory(signal, nowMs))
+                double score = 0;
+                StringBuilder flags = new StringBuilder();
+                BotSide side = signal.Side;
+                bool isBigPrint = signal.Mode == "BIGPRINT";
+                ObBlock b = signal.Block;
+
+                if (!isBigPrint && b != null && b.Confirmed)
                 {
-                    return true;
+                    score += o.ObScoreConfirmed;
+                    AppendFlag(flags, "CONFIRMED");
                 }
-                if (RejectedByAbsorption(signal.Side, price, nowMs))
+                if (isBigPrint)
                 {
-                    LogSignalRejected(signal, price, nowMs, "ABSORPTION");
-                    return false;
+                    score += o.ObScoreBigPrint;
+                    AppendFlag(flags, "BIGPRINT");
                 }
-                if (RejectedByStackedImbalance(signal.Side))
+                if (signal.BigPrintSweep)
                 {
-                    LogSignalRejected(signal, price, nowMs, "STACKED_IMBALANCE");
-                    return false;
+                    score += o.ObScoreSweep;
+                    AppendFlag(flags, "SWEEP");
                 }
-                return true;
+
+                bool absNow = HasFavorableAbsorption(side, nowMs);
+                bool absMemory = b != null && o.ObAbsorptionEnabled && o.ObConfirmationMemoryMs > 0
+                        && (nowMs - b.LastAbsorptionPassMs <= o.ObConfirmationMemoryMs);
+                if (absNow || absMemory)
+                {
+                    score += o.ObScoreAbsorption;
+                    AppendFlag(flags, absNow ? "ABSORPTION" : "ABSORPTION_MEMORY");
+                }
+                if (RejectedByAbsorption(side, price, nowMs))
+                {
+                    score += o.ObScoreBadAbsorption;
+                    AppendFlag(flags, "BAD_ABSORPTION");
+                }
+
+                bool imbNow = false;
+                if (o.ObStackedImbalanceEnabled)
+                {
+                    imbNow = HasFavorableStackedImbalance(side);
+                    bool imbMemory = b != null && o.ObConfirmationMemoryMs > 0
+                            && (nowMs - b.LastImbalancePassMs <= o.ObConfirmationMemoryMs);
+                    if (imbNow || imbMemory)
+                    {
+                        score += o.ObScoreImbalance;
+                        AppendFlag(flags, imbNow ? "IMBALANCE" : "IMBALANCE_MEMORY");
+                    }
+                }
+
+                signal.EntryScore = score;
+                signal.EntryFlags = flags.Length > 0 ? flags.ToString() : "NONE";
+                return score >= o.ObMinEntryScore;
             }
 
             private bool RejectedByAbsorption(BotSide side, double price, long nowMs)
@@ -1172,7 +1211,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                         LogConfirmationMemory(b, nowMs, "ABSORPTION");
                     }
                 }
-                if (HasFavorableStackedImbalance(b.Side))
+                if (o.ObStackedImbalanceEnabled && HasFavorableStackedImbalance(b.Side))
                 {
                     b.LastImbalancePassMs = nowMs;
                     if (!b.ImbalanceMemoryLogged)
@@ -1192,6 +1231,12 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return absOk && imbOk;
             }
 
+            private void AppendFlag(StringBuilder sb, string flag)
+            {
+                if (sb.Length > 0) { sb.Append('+'); }
+                sb.Append(flag);
+            }
+
             private void LogSignalRejected(ObSignal signal, double price, long nowMs, string reason)
             {
                 if (o.blackBox == null) { return; }
@@ -1202,6 +1247,21 @@ namespace NinjaTrader.NinjaScript.Strategies
                         "lastPrice", Round2(price),
                         "mode", signal.Mode,
                         "reason", reason);
+            }
+
+            private void LogSignalRejected(ObSignal signal, double price, long nowMs, string reason,
+                    double score, string flags)
+            {
+                if (o.blackBox == null) { return; }
+                o.blackBox.Log(nowMs, "OB_SIGNAL_REJECTED",
+                        "blockId", signal.Block != null ? signal.Block.Id : 0,
+                        "side", signal.Side.ToString().ToUpperInvariant(),
+                        "price", Round2(signal.Price),
+                        "lastPrice", Round2(price),
+                        "mode", signal.Mode,
+                        "reason", reason,
+                        "score", Round2(score),
+                        "flags", flags);
             }
 
             private void LogConfirmationMemory(ObBlock b, long nowMs, string type)
@@ -1294,10 +1354,10 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
 
             private void RejectBigPrint(string reason, double price, long nowMs,
-                    double sweepMeasure = double.NaN)
+                    double sweepMeasure = double.NaN, double score = double.NaN, string flags = null)
             {
                 if (o.blackBox == null) { return; }
-                if (double.IsNaN(sweepMeasure))
+                if (double.IsNaN(sweepMeasure) && double.IsNaN(score))
                 {
                     o.blackBox.Log(nowMs, "BIGPRINT_REJECTED",
                             "side", pendingBigPrint.Side.ToString().ToUpperInvariant(),
@@ -1306,6 +1366,17 @@ namespace NinjaTrader.NinjaScript.Strategies
                             "volume", pendingBigPrint.BigPrintVolume,
                             "delta", pendingBigPrint.BigPrintDelta,
                             "reason", reason);
+                }
+                else if (double.IsNaN(score))
+                {
+                    o.blackBox.Log(nowMs, "BIGPRINT_REJECTED",
+                            "side", pendingBigPrint.Side.ToString().ToUpperInvariant(),
+                            "price", Round2(pendingBigPrint.Price),
+                            "lastPrice", Round2(price),
+                            "volume", pendingBigPrint.BigPrintVolume,
+                            "delta", pendingBigPrint.BigPrintDelta,
+                            "reason", reason,
+                            "sweepMeasure", Round2(sweepMeasure));
                 }
                 else
                 {
@@ -1316,7 +1387,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                             "volume", pendingBigPrint.BigPrintVolume,
                             "delta", pendingBigPrint.BigPrintDelta,
                             "reason", reason,
-                            "sweepMeasure", Round2(sweepMeasure));
+                            "sweepMeasure", double.IsNaN(sweepMeasure) ? 0 : Round2(sweepMeasure),
+                            "score", Round2(score),
+                            "flags", flags != null ? flags : "NONE");
                 }
                 pendingBigPrint = null;
             }
@@ -1380,12 +1453,13 @@ namespace NinjaTrader.NinjaScript.Strategies
                         : price <= pendingBigPrint.Price;
                 if (!favorable) { return null; }
 
-                // Tape / DOM confirmation filter. Apply it to the live entry tick
-                // so we skip BigPrints that are being absorbed or fighting a stacked
-                // order book.
+                // Tape / DOM confirmation scoring. If the score is below threshold
+                // the BigPrint is rejected with score/flags for later analysis.
                 if (!SignalAllowed(pendingBigPrint, price, nowMs))
                 {
-                    pendingBigPrint = null;
+                    RejectBigPrint("SCORE_LOW", price, nowMs,
+                            pendingBigPrint.BigPrintSweepMeasure,
+                            pendingBigPrint.EntryScore, pendingBigPrint.EntryFlags);
                     return null;
                 }
 
@@ -1434,6 +1508,8 @@ namespace NinjaTrader.NinjaScript.Strategies
         private enum TradeState { Flat, Entering, Open }
         private string openEngine;               // SignalWall / SignalOb / SignalRevenge, or null
         private string pendingObEntryMode;       // TOUCH / FAST_BOUNCE / RETEST_DWELL / BIGPRINT
+        private double pendingObEntryScore;
+        private string pendingObEntryFlags;
         private double obBigPrintVolume;         // set by BIGPRINT signals (block == null)
         private double obBigPrintDelta;
         private TradeState tradeState = TradeState.Flat;
@@ -1982,6 +2058,42 @@ namespace NinjaTrader.NinjaScript.Strategies
         [Display(Name = "Confirmation memory (ms)", GroupName = "11. OB Confirmations", Order = 8)]
         public long ObConfirmationMemoryMs { get; set; }
 
+        // --- OB entry scoring: confirmations add points instead of hard gates ---
+        [NinjaScriptProperty]
+        [Range(-999, 999)]
+        [Display(Name = "Min entry score", GroupName = "12. OB Entry Scoring", Order = 0)]
+        public int ObMinEntryScore { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(-999, 999)]
+        [Display(Name = "Score: OB confirmed", GroupName = "12. OB Entry Scoring", Order = 1)]
+        public int ObScoreConfirmed { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(-999, 999)]
+        [Display(Name = "Score: favorable absorption", GroupName = "12. OB Entry Scoring", Order = 2)]
+        public int ObScoreAbsorption { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(-999, 999)]
+        [Display(Name = "Score: bad absorption", GroupName = "12. OB Entry Scoring", Order = 3)]
+        public int ObScoreBadAbsorption { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(-999, 999)]
+        [Display(Name = "Score: stacked imbalance", GroupName = "12. OB Entry Scoring", Order = 4)]
+        public int ObScoreImbalance { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(-999, 999)]
+        [Display(Name = "Score: big print", GroupName = "12. OB Entry Scoring", Order = 5)]
+        public int ObScoreBigPrint { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(-999, 999)]
+        [Display(Name = "Score: liquidity sweep", GroupName = "12. OB Entry Scoring", Order = 6)]
+        public int ObScoreSweep { get; set; }
+
         // =====================================================================
         // Lifecycle
         // =====================================================================
@@ -2117,6 +2229,14 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ObStackedImbalanceRatio = 1.5;
 
                 ObConfirmationMemoryMs = 3000;
+
+                ObMinEntryScore = 70;
+                ObScoreConfirmed = 40;
+                ObScoreAbsorption = 25;
+                ObScoreBadAbsorption = -30;
+                ObScoreImbalance = 15;
+                ObScoreBigPrint = 50;
+                ObScoreSweep = 10;
             }
             else if (State == State.DataLoaded)
             {
@@ -2680,6 +2800,8 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (obSig != null && CanEnter(SignalOb))
             {
                 pendingObEntryMode = obSig.Mode;
+                pendingObEntryScore = obSig.EntryScore;
+                pendingObEntryFlags = obSig.EntryFlags;
                 obBigPrintVolume = obSig.BigPrintVolume;
                 obBigPrintDelta = obSig.BigPrintDelta;
                 if (OpenTrade(SignalOb, obSig.Side, price, ObOrderSize,
@@ -2690,6 +2812,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                         obEngine.MarkTraded(obSig.Block);
                     }
                 }
+                pendingObEntryScore = 0;
+                pendingObEntryFlags = null;
                 obBigPrintVolume = 0;
                 obBigPrintDelta = 0;
             }
@@ -2960,6 +3084,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                         "blockVolume", blockVolume,
                         "blockDelta", blockDelta,
                         "reconfirm", reconfirm,
+                        "entryScore", pendingObEntryScore,
+                        "scoreFlags", pendingObEntryFlags != null ? pendingObEntryFlags : "NONE",
                         "shadow", tradeIsShadow);
             }
             else if (isRevenge)
