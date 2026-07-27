@@ -72,7 +72,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             public BlackBox(string alias)
             {
                 safeAlias = System.Text.RegularExpressions.Regex.Replace(
-                    alias ?? "unknown", "[^a-zA-Z0-9._-]", "_");
+                    (alias != null ? alias : "unknown"), "[^a-zA-Z0-9._-]", "_");
                 dir = Path.Combine(Core.Globals.UserDataDir, "liquidity-wall-bot", "logs");
             }
 
@@ -3027,7 +3027,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 obNetPnl += pnlDollars;
                 if (win) { dayObWins++; } else { dayObLosses++; }
                 dayObPnl += pnlDollars;
-                string mode = pendingObEntryMode ?? "UNKNOWN";
+                string mode = pendingObEntryMode != null ? pendingObEntryMode : "UNKNOWN";
                 double[] ms;
                 if (!dayModeStats.TryGetValue(mode, out ms))
                 {
@@ -3157,7 +3157,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 blackBox.Log(nowMs, "ORDER_REJECTED",
                         "orderName", order.Name,
                         "error", error.ToString(),
-                        "comment", comment ?? "");
+                        "comment", comment != null ? comment : "");
                 if (tradeState == TradeState.Entering
                         && (order.Name == SignalWall || order.Name == SignalOb
                             || order.Name == SignalRevenge))
