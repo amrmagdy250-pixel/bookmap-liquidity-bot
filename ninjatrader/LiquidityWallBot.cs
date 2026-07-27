@@ -625,6 +625,10 @@ namespace NinjaTrader.NinjaScript.Strategies
             public bool AbsorptionMemoryLogged;
             public bool ImbalanceMemoryLogged;
 
+            // Prevent repetitive SCORE_LOW/Reject logging for the same block.
+            public long LastRejectMs;
+            public double LastRejectScore;
+
             public double Center() { return (Low + High) / 2.0; }
         }
 
@@ -862,8 +866,17 @@ namespace NinjaTrader.NinjaScript.Strategies
                 }
                 if (signal != null && !SignalAllowed(signal, price, nowMs))
                 {
-                    LogSignalRejected(signal, price, nowMs, "SCORE_LOW",
-                            signal.EntryScore, signal.EntryFlags);
+                    ObBlock rb = signal.Block;
+                    if (rb == null || nowMs - rb.LastRejectMs > 500)
+                    {
+                        LogSignalRejected(signal, price, nowMs, "SCORE_LOW",
+                                signal.EntryScore, signal.EntryFlags);
+                    }
+                    if (rb != null)
+                    {
+                        rb.LastRejectMs = nowMs;
+                        rb.LastRejectScore = signal.EntryScore;
+                    }
                     signal = null;
                 }
                 if (signal == null)
@@ -1094,6 +1107,20 @@ namespace NinjaTrader.NinjaScript.Strategies
                 {
                     score += o.ObScoreSweep;
                     AppendFlag(flags, "SWEEP");
+                }
+
+                if (!isBigPrint && b != null && b.Confirmed)
+                {
+                    if (signal.Mode == "TOUCH")
+                    {
+                        score += o.ObScoreTouch;
+                        AppendFlag(flags, "TOUCH");
+                    }
+                    else if (signal.Mode == "FAST_BOUNCE" || signal.Mode == "RETEST_DWELL")
+                    {
+                        score += o.ObScoreRetest;
+                        AppendFlag(flags, "RETEST");
+                    }
                 }
 
                 bool absNow = HasFavorableAbsorption(side, nowMs);
@@ -2071,27 +2098,37 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         [NinjaScriptProperty]
         [Range(-999, 999)]
-        [Display(Name = "Score: favorable absorption", GroupName = "12. OB Entry Scoring", Order = 2)]
+        [Display(Name = "Score: touch entry", GroupName = "12. OB Entry Scoring", Order = 2)]
+        public int ObScoreTouch { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(-999, 999)]
+        [Display(Name = "Score: retest/fast bounce", GroupName = "12. OB Entry Scoring", Order = 3)]
+        public int ObScoreRetest { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(-999, 999)]
+        [Display(Name = "Score: favorable absorption", GroupName = "12. OB Entry Scoring", Order = 4)]
         public int ObScoreAbsorption { get; set; }
 
         [NinjaScriptProperty]
         [Range(-999, 999)]
-        [Display(Name = "Score: bad absorption", GroupName = "12. OB Entry Scoring", Order = 3)]
+        [Display(Name = "Score: bad absorption", GroupName = "12. OB Entry Scoring", Order = 5)]
         public int ObScoreBadAbsorption { get; set; }
 
         [NinjaScriptProperty]
         [Range(-999, 999)]
-        [Display(Name = "Score: stacked imbalance", GroupName = "12. OB Entry Scoring", Order = 4)]
+        [Display(Name = "Score: stacked imbalance", GroupName = "12. OB Entry Scoring", Order = 6)]
         public int ObScoreImbalance { get; set; }
 
         [NinjaScriptProperty]
         [Range(-999, 999)]
-        [Display(Name = "Score: big print", GroupName = "12. OB Entry Scoring", Order = 5)]
+        [Display(Name = "Score: big print", GroupName = "12. OB Entry Scoring", Order = 7)]
         public int ObScoreBigPrint { get; set; }
 
         [NinjaScriptProperty]
         [Range(-999, 999)]
-        [Display(Name = "Score: liquidity sweep", GroupName = "12. OB Entry Scoring", Order = 6)]
+        [Display(Name = "Score: liquidity sweep", GroupName = "12. OB Entry Scoring", Order = 8)]
         public int ObScoreSweep { get; set; }
 
         // =====================================================================
@@ -2230,9 +2267,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                 ObConfirmationMemoryMs = 3000;
 
-                ObMinEntryScore = 70;
-                ObScoreConfirmed = 40;
-                ObScoreAbsorption = 25;
+                ObMinEntryScore = 60;
+                ObScoreConfirmed = 35;
+                ObScoreTouch = 25;
+                ObScoreRetest = 20;
+                ObScoreAbsorption = 20;
                 ObScoreBadAbsorption = -30;
                 ObScoreImbalance = 15;
                 ObScoreBigPrint = 50;
