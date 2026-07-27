@@ -617,6 +617,14 @@ namespace NinjaTrader.NinjaScript.Strategies
             public double WorstExtreme;
             public long LastCounterMs;
 
+            // Tape + DOM confirmation memory: the filters are evaluated while the
+            // price is inside the OB zone, and the first FastBounce/Retest after a
+            // recent pass is allowed even if the live filter has vanished.
+            public long LastAbsorptionPassMs;
+            public long LastImbalancePassMs;
+            public bool AbsorptionMemoryLogged;
+            public bool ImbalanceMemoryLogged;
+
             public double Center() { return (Low + High) / 2.0; }
         }
 
@@ -814,6 +822,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                             {
                                 b.WorstExtreme = price;
                             }
+                            UpdateConfirmationMemory(b, nowMs);
                             if (Guarded(b, price, nowMs)) { continue; }
                             if (!o.ObRetestConfirmEnabled)
                             {
@@ -835,6 +844,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                         else if (b.InZone)
                         {
                             b.InZone = false;
+                            b.AbsorptionMemoryLogged = false;
+                            b.ImbalanceMemoryLogged = false;
                             if (!o.ObRetestConfirmEnabled) { continue; }
                             // Fast bounce: price touched the zone and left it on the
                             // profit side - the rejection itself is the confirmation.
@@ -1052,12 +1063,19 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return hit;
             }
 
-            /** Tape + DOM confirmation filter applied to every OB or BigPrint signal
-             *  just before the strategy opens a trade. Rejects entries where the tape
-             *  shows same-side absorption (large volume but price stuck) or where the
-             *  nearby DOM does not stack in the entry's direction. */
+            /** Tape + DOM confirmation applied to every OB or BigPrint signal just
+             *  before the strategy opens a trade. For OBs, the filter values are
+             *  remembered while price is inside the zone; the first FastBounce or
+             *  Retest is allowed if a favourable signature was seen recently, which
+             *  removes the delay caused by waiting for the DOM/tape to still be
+             *  aligned exactly at the moment the bounce fires. */
             private bool SignalAllowed(ObSignal signal, double price, long nowMs)
             {
+                // OBs use confirmation memory; BigPrint (no block) uses live filters.
+                if (HasConfirmationMemory(signal, nowMs))
+                {
+                    return true;
+                }
                 if (RejectedByAbsorption(signal.Side, price, nowMs))
                 {
                     LogSignalRejected(signal, price, nowMs, "ABSORPTION");
@@ -1073,12 +1091,31 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             private bool RejectedByAbsorption(BotSide side, double price, long nowMs)
             {
+                double volume, deltaVol, range;
+                if (!TryGetAbsorptionStats(nowMs, out volume, out deltaVol, out range)) { return false; }
+                bool sameDir = side == BotSide.Long ? deltaVol > 0 : deltaVol < 0;
+                double ratio = volume > 0 ? Math.Abs(deltaVol) / volume : 0;
+                return sameDir && ratio >= o.ObAbsorptionRejectRatio;
+            }
+
+            private bool HasFavorableAbsorption(BotSide side, long nowMs)
+            {
+                double volume, deltaVol, range;
+                if (!TryGetAbsorptionStats(nowMs, out volume, out deltaVol, out range)) { return false; }
+                bool oppositeDir = side == BotSide.Long ? deltaVol < 0 : deltaVol > 0;
+                double ratio = volume > 0 ? Math.Abs(deltaVol) / volume : 0;
+                return oppositeDir && ratio >= o.ObAbsorptionRejectRatio;
+            }
+
+            private bool TryGetAbsorptionStats(long nowMs, out double volume, out double deltaVol, out double range)
+            {
+                volume = 0;
+                deltaVol = 0;
+                range = 0;
                 if (!o.ObAbsorptionEnabled || absorptionExecs.Count == 0) { return false; }
                 long windowStart = nowMs - o.ObAbsorptionWindowMs;
                 double minP = double.MaxValue;
                 double maxP = double.MinValue;
-                double volume = 0;
-                double deltaVol = 0;
                 foreach (var e in absorptionExecs)
                 {
                     if (e.Time < windowStart) { continue; }
@@ -1088,19 +1125,22 @@ namespace NinjaTrader.NinjaScript.Strategies
                     if (e.Price > maxP) { maxP = e.Price; }
                 }
                 if (volume < o.ObAbsorptionMinVolume) { return false; }
-                double range = maxP - minP;
+                range = maxP - minP;
                 if (range > o.ObAbsorptionMaxRangeDollars) { return false; }
-                bool sameDir = side == BotSide.Long ? deltaVol > 0 : deltaVol < 0;
-                double ratio = volume > 0 ? Math.Abs(deltaVol) / volume : 0;
-                return sameDir && ratio >= o.ObAbsorptionRejectRatio;
+                return true;
             }
 
             private bool RejectedByStackedImbalance(BotSide side)
             {
-                if (!o.ObStackedImbalanceEnabled) { return false; }
+                return !HasFavorableStackedImbalance(side);
+            }
+
+            private bool HasFavorableStackedImbalance(BotSide side)
+            {
+                if (!o.ObStackedImbalanceEnabled) { return true; }
                 var bidLevels = o.bids.Levels;
                 var askLevels = o.asks.Levels;
-                if (bidLevels.Count == 0 || askLevels.Count == 0) { return false; }
+                if (bidLevels.Count == 0 || askLevels.Count == 0) { return true; }
                 int bestBid = bidLevels.Keys.Max();
                 int bestAsk = askLevels.Keys.Min();
                 long bidSum = 0;
@@ -1113,9 +1153,43 @@ namespace NinjaTrader.NinjaScript.Strategies
                 if (bidSum <= 0 || askSum <= 0) { return false; }
                 if (side == BotSide.Long)
                 {
-                    return (double)bidSum / (double)askSum < o.ObStackedImbalanceRatio;
+                    return (double)bidSum / (double)askSum >= o.ObStackedImbalanceRatio;
                 }
-                return (double)askSum / (double)bidSum < o.ObStackedImbalanceRatio;
+                return (double)askSum / (double)bidSum >= o.ObStackedImbalanceRatio;
+            }
+
+            /** While price is inside an OB zone, remember recent favourable tape/DOM
+             *  signatures so the bounce can enter immediately once it appears. */
+            private void UpdateConfirmationMemory(ObBlock b, long nowMs)
+            {
+                if (!b.Confirmed) { return; }
+                if (HasFavorableAbsorption(b.Side, nowMs))
+                {
+                    b.LastAbsorptionPassMs = nowMs;
+                    if (!b.AbsorptionMemoryLogged)
+                    {
+                        b.AbsorptionMemoryLogged = true;
+                        LogConfirmationMemory(b, nowMs, "ABSORPTION");
+                    }
+                }
+                if (HasFavorableStackedImbalance(b.Side))
+                {
+                    b.LastImbalancePassMs = nowMs;
+                    if (!b.ImbalanceMemoryLogged)
+                    {
+                        b.ImbalanceMemoryLogged = true;
+                        LogConfirmationMemory(b, nowMs, "STACKED_IMBALANCE");
+                    }
+                }
+            }
+
+            private bool HasConfirmationMemory(ObSignal signal, long nowMs)
+            {
+                ObBlock b = signal.Block;
+                if (b == null || o.ObConfirmationMemoryMs <= 0) { return false; }
+                bool absOk = !o.ObAbsorptionEnabled || (nowMs - b.LastAbsorptionPassMs <= o.ObConfirmationMemoryMs);
+                bool imbOk = !o.ObStackedImbalanceEnabled || (nowMs - b.LastImbalancePassMs <= o.ObConfirmationMemoryMs);
+                return absOk && imbOk;
             }
 
             private void LogSignalRejected(ObSignal signal, double price, long nowMs, string reason)
@@ -1128,6 +1202,15 @@ namespace NinjaTrader.NinjaScript.Strategies
                         "lastPrice", Round2(price),
                         "mode", signal.Mode,
                         "reason", reason);
+            }
+
+            private void LogConfirmationMemory(ObBlock b, long nowMs, string type)
+            {
+                if (o.blackBox == null) { return; }
+                o.blackBox.Log(nowMs, "OB_CONFIRMATION_MEMORY",
+                        "blockId", b.Id,
+                        "side", b.Side.ToString().ToUpperInvariant(),
+                        "type", type);
             }
 
             /** Big Print detector. Adds incoming executions to a short window and,
@@ -1894,6 +1977,11 @@ namespace NinjaTrader.NinjaScript.Strategies
         [Display(Name = "Imbalance min ratio", GroupName = "11. OB Confirmations", Order = 7)]
         public double ObStackedImbalanceRatio { get; set; }
 
+        [NinjaScriptProperty]
+        [Range(0, long.MaxValue)]
+        [Display(Name = "Confirmation memory (ms)", GroupName = "11. OB Confirmations", Order = 8)]
+        public long ObConfirmationMemoryMs { get; set; }
+
         // =====================================================================
         // Lifecycle
         // =====================================================================
@@ -2027,6 +2115,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ObStackedImbalanceEnabled = true;
                 ObStackedImbalanceDepth = 5;
                 ObStackedImbalanceRatio = 1.5;
+
+                ObConfirmationMemoryMs = 3000;
             }
             else if (State == State.DataLoaded)
             {
