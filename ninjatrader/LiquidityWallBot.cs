@@ -669,6 +669,10 @@ namespace NinjaTrader.NinjaScript.Strategies
             private readonly Queue<KeyValuePair<long, double>> sweepPath =
                     new Queue<KeyValuePair<long, double>>();
 
+            // Tape absorption window: heavy execution volume with little price
+            // movement, used to reject fake breakout entries.
+            private readonly Queue<ObExec> absorptionExecs = new Queue<ObExec>();
+
             public OrderBlockEngine(LiquidityWallBot owner) { o = owner; }
 
             public List<ObBlock> ActiveBlocks { get { return blocks; } }
@@ -679,6 +683,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 blocks.Clear();
                 pricePath.Clear();
                 sweepPath.Clear();
+                absorptionExecs.Clear();
                 penalizedAreas.Clear();
                 bigPrintWindow.Clear();
                 pendingBigPrint = null;
@@ -707,6 +712,24 @@ namespace NinjaTrader.NinjaScript.Strategies
                     ScanForZone(nowMs);
                 }
                 TrackBigPrint(price, size, buyAggressor, nowMs);
+                UpdateAbsorption(price, size, buyAggressor, nowMs);
+            }
+
+            private void UpdateAbsorption(double price, long size, bool buyAggressor, long nowMs)
+            {
+                if (!o.ObAbsorptionEnabled) { return; }
+                absorptionExecs.Enqueue(new ObExec
+                {
+                    Price = price,
+                    Size = size,
+                    DeltaSign = buyAggressor ? 1 : -1,
+                    Time = nowMs
+                });
+                long horizon = nowMs - o.ObAbsorptionWindowMs;
+                while (absorptionExecs.Count > 0 && absorptionExecs.Peek().Time < horizon)
+                {
+                    absorptionExecs.Dequeue();
+                }
             }
 
             public ObSignal OnPrice(double price, long nowMs)
@@ -823,6 +846,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                             signal = new ObSignal { Block = b, Side = b.Side, Price = price, Mode = "FAST_BOUNCE", Time = nowMs };
                         }
                     }
+                }
+                if (signal != null && !SignalAllowed(signal, price, nowMs))
+                {
+                    signal = null;
                 }
                 if (signal == null)
                 {
@@ -1025,6 +1052,84 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return hit;
             }
 
+            /** Tape + DOM confirmation filter applied to every OB or BigPrint signal
+             *  just before the strategy opens a trade. Rejects entries where the tape
+             *  shows same-side absorption (large volume but price stuck) or where the
+             *  nearby DOM does not stack in the entry's direction. */
+            private bool SignalAllowed(ObSignal signal, double price, long nowMs)
+            {
+                if (RejectedByAbsorption(signal.Side, price, nowMs))
+                {
+                    LogSignalRejected(signal, price, nowMs, "ABSORPTION");
+                    return false;
+                }
+                if (RejectedByStackedImbalance(signal.Side))
+                {
+                    LogSignalRejected(signal, price, nowMs, "STACKED_IMBALANCE");
+                    return false;
+                }
+                return true;
+            }
+
+            private bool RejectedByAbsorption(BotSide side, double price, long nowMs)
+            {
+                if (!o.ObAbsorptionEnabled || absorptionExecs.Count == 0) { return false; }
+                long windowStart = nowMs - o.ObAbsorptionWindowMs;
+                double minP = double.MaxValue;
+                double maxP = double.MinValue;
+                double volume = 0;
+                double deltaVol = 0;
+                foreach (var e in absorptionExecs)
+                {
+                    if (e.Time < windowStart) { continue; }
+                    volume += e.Size;
+                    deltaVol += e.Size * e.DeltaSign;
+                    if (e.Price < minP) { minP = e.Price; }
+                    if (e.Price > maxP) { maxP = e.Price; }
+                }
+                if (volume < o.ObAbsorptionMinVolume) { return false; }
+                double range = maxP - minP;
+                if (range > o.ObAbsorptionMaxRangeDollars) { return false; }
+                bool sameDir = side == BotSide.Long ? deltaVol > 0 : deltaVol < 0;
+                double ratio = volume > 0 ? Math.Abs(deltaVol) / volume : 0;
+                return sameDir && ratio >= o.ObAbsorptionRejectRatio;
+            }
+
+            private bool RejectedByStackedImbalance(BotSide side)
+            {
+                if (!o.ObStackedImbalanceEnabled) { return false; }
+                var bidLevels = o.bids.Levels;
+                var askLevels = o.asks.Levels;
+                if (bidLevels.Count == 0 || askLevels.Count == 0) { return false; }
+                int bestBid = bidLevels.Keys.Max();
+                int bestAsk = askLevels.Keys.Min();
+                long bidSum = 0;
+                long askSum = 0;
+                for (int i = 0; i < o.ObStackedImbalanceDepth; i++)
+                {
+                    if (bidLevels.ContainsKey(bestBid - i)) { bidSum += bidLevels[bestBid - i]; }
+                    if (askLevels.ContainsKey(bestAsk + i)) { askSum += askLevels[bestAsk + i]; }
+                }
+                if (bidSum <= 0 || askSum <= 0) { return false; }
+                if (side == BotSide.Long)
+                {
+                    return (double)bidSum / (double)askSum < o.ObStackedImbalanceRatio;
+                }
+                return (double)askSum / (double)bidSum < o.ObStackedImbalanceRatio;
+            }
+
+            private void LogSignalRejected(ObSignal signal, double price, long nowMs, string reason)
+            {
+                if (o.blackBox == null) { return; }
+                o.blackBox.Log(nowMs, "OB_SIGNAL_REJECTED",
+                        "blockId", signal.Block != null ? signal.Block.Id : 0,
+                        "side", signal.Side.ToString().ToUpperInvariant(),
+                        "price", Round2(signal.Price),
+                        "lastPrice", Round2(price),
+                        "mode", signal.Mode,
+                        "reason", reason);
+            }
+
             /** Big Print detector. Adds incoming executions to a short window and,
              *  when the window reaches a minimum total volume with a dominant
              *  one-sided delta, raises an OB signal with no block (entryMode BIGPRINT).
@@ -1191,6 +1296,15 @@ namespace NinjaTrader.NinjaScript.Strategies
                         ? price >= pendingBigPrint.Price
                         : price <= pendingBigPrint.Price;
                 if (!favorable) { return null; }
+
+                // Tape / DOM confirmation filter. Apply it to the live entry tick
+                // so we skip BigPrints that are being absorbed or fighting a stacked
+                // order book.
+                if (!SignalAllowed(pendingBigPrint, price, nowMs))
+                {
+                    pendingBigPrint = null;
+                    return null;
+                }
 
                 ObSignal s = pendingBigPrint;
                 pendingBigPrint = null;
@@ -1741,6 +1855,45 @@ namespace NinjaTrader.NinjaScript.Strategies
         [Display(Name = "Sweep min pullback ($)", GroupName = "10. OB Big Print", Order = 8)]
         public double ObBigPrintSweepPullbackDollars { get; set; }
 
+        // --- OB confirmations: tape absorption + DOM stacked imbalance ---
+        [NinjaScriptProperty]
+        [Display(Name = "OB absorption enabled", GroupName = "11. OB Confirmations", Order = 0)]
+        public bool ObAbsorptionEnabled { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(100, long.MaxValue)]
+        [Display(Name = "Absorption window (ms)", GroupName = "11. OB Confirmations", Order = 1)]
+        public long ObAbsorptionWindowMs { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, long.MaxValue)]
+        [Display(Name = "Absorption min volume", GroupName = "11. OB Confirmations", Order = 2)]
+        public long ObAbsorptionMinVolume { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0.01, double.MaxValue)]
+        [Display(Name = "Absorption max range ($)", GroupName = "11. OB Confirmations", Order = 3)]
+        public double ObAbsorptionMaxRangeDollars { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0.0, 1.0)]
+        [Display(Name = "Absorption reject ratio", GroupName = "11. OB Confirmations", Order = 4)]
+        public double ObAbsorptionRejectRatio { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "OB stacked imbalance enabled", GroupName = "11. OB Confirmations", Order = 5)]
+        public bool ObStackedImbalanceEnabled { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(1, int.MaxValue)]
+        [Display(Name = "Imbalance depth (levels)", GroupName = "11. OB Confirmations", Order = 6)]
+        public int ObStackedImbalanceDepth { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0.1, double.MaxValue)]
+        [Display(Name = "Imbalance min ratio", GroupName = "11. OB Confirmations", Order = 7)]
+        public double ObStackedImbalanceRatio { get; set; }
+
         // =====================================================================
         // Lifecycle
         // =====================================================================
@@ -1864,6 +2017,16 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ObBigPrintSweepEnabled = true;
                 ObBigPrintSweepWindowMs = 30000;
                 ObBigPrintSweepPullbackDollars = 1.0;
+
+                ObAbsorptionEnabled = true;
+                ObAbsorptionWindowMs = 1000;
+                ObAbsorptionMinVolume = 80;
+                ObAbsorptionMaxRangeDollars = 0.4;
+                ObAbsorptionRejectRatio = 0.55;
+
+                ObStackedImbalanceEnabled = true;
+                ObStackedImbalanceDepth = 5;
+                ObStackedImbalanceRatio = 1.5;
             }
             else if (State == State.DataLoaded)
             {
@@ -1989,6 +2152,15 @@ namespace NinjaTrader.NinjaScript.Strategies
                     "obBigPrintSweepEnabled", ObBigPrintSweepEnabled,
                     "obBigPrintSweepWindowMs", ObBigPrintSweepWindowMs,
                     "obBigPrintSweepPullback", ObBigPrintSweepPullbackDollars);
+            blackBox.LogStartup(nowMs, "OB_CONFIRMATION_SETTINGS",
+                    "obAbsorptionEnabled", ObAbsorptionEnabled,
+                    "obAbsorptionWindowMs", ObAbsorptionWindowMs,
+                    "obAbsorptionMinVolume", ObAbsorptionMinVolume,
+                    "obAbsorptionMaxRange", ObAbsorptionMaxRangeDollars,
+                    "obAbsorptionRejectRatio", ObAbsorptionRejectRatio,
+                    "obStackedImbalanceEnabled", ObStackedImbalanceEnabled,
+                    "obStackedImbalanceDepth", ObStackedImbalanceDepth,
+                    "obStackedImbalanceRatio", ObStackedImbalanceRatio);
         }
 
         // =====================================================================
