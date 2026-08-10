@@ -1,0 +1,168 @@
+Codex — SHADOW MICRO-FLIP LOGGER IMPLEMENTATION (v1.2 FINAL)
+
+ROLE
+Build a telemetry-only NinjaScript shadow logger. No live orders. No TP/SL logic. No position sizing. No routing. No threshold or filter search. No changes to research definitions.
+
+HARD PROHIBITIONS
+- Do NOT edit LiquidityWallBot.cs or any existing trading strategy file.
+- The new module must contain ZERO order-submission code. Do not use EnterLong, EnterShort, ExitLong, ExitShort, SubmitOrderUnmanaged, ATM helpers, or any routing call — not even disabled.
+- Do not redesign the V3.1 detector, optimize filters, or change frozen definitions.
+- If porting the frozen detector requires a semantic choice the frozen analyzer/spec does not resolve, STOP and report the ambiguity. Do not improvise.
+
+DELIVERABLE
+A single new file:
+  ShadowMicroFlipLogger.cs
+plus its runtime outputs:
+  SHADOW_FLIP_TELEMETRY.jsonl
+  SHADOW_FLIP_SESSION_STATUS.json
+
+MODE
+SHADOW_ONLY_MODE is hard-coded true. Not a user-toggleable property. Every telemetry record and the status file must include shadowOnly = true.
+
+INSTRUMENT
+GC 12-26 only. Log Instrument.FullName at startup and per signal. If loaded on any other instrument, hard-stop telemetry with WRONG_INSTRUMENT and write that state to the status file. No automatic rollover.
+
+EXECUTION ENVIRONMENT (IMPORTANT)
+OnMarketData and OnMarketDepth are NOT invoked by the NinjaTrader Strategy Analyzer historical backtest. This module must be run against a Market Replay connection (or live data) so L1 and L2 callbacks fire. Verify at startup that market data and market depth callbacks are actually being received; if no depth events arrive within the first minute of an active session, write DEPTH_UNAVAILABLE to the status file and continue logging L1-only records with a flag rather than silently emitting empty depth.
+
+CALLBACKS
+- OnMarketData -> L1 only: Last, best Bid, best Ask, L1 volumes.
+- OnMarketDepth -> L2 only: side, operation (Insert/Update/Remove), position, price, volume.
+- OnBarUpdate -> only where the frozen V3.1 lifecycle genuinely needs bar state.
+- Calculate = Calculate.OnEachTick.
+- Do NOT assume any ordering between OnMarketData and OnMarketDepth. Maintain independent causal state per stream.
+- Stamp every update with the platform event timestamp (e.Time) and a local monotonic sequence counter. Never use DateTime.Now for timing logic.
+
+L2 BOOK MAINTENANCE
+Maintain a deterministic side-specific ladder applying Insert / Update / Remove / position shifts. At T0 snapshot the top 5 bid and top 5 ask levels (price + volume). Do not log a single depth event and call it a book snapshot.
+
+FROZEN SIGNAL (unchanged)
+1. Valid V3.1 Order Block exists.
+2. Confirmed failure FULLY_CONSUMED_FAILURE or exact equivalent.
+3. failureMs known.
+4. First valid opposite-side retest occurs.
+5. T0 = oppositeRetestMs.
+6. Direction = reversed polarity.
+
+No filters, no scoring, no extra confirmations.
+
+EVENT IDENTITY AND signalId
+- The uniqueness key for counting events must remain the audit tuple:
+  (date, contract, T0/entryMs, entryPrice, direction)
+  This must match the offline audit dedup exactly, otherwise equivalence will fail for a bookkeeping reason rather than a real one.
+- signalId is a deterministic hash/canonicalization of:
+  contract + T0 timestamp + direction + entry/retest price
+- clusterId and candidateId are logged as metadata for traceability but are NOT part of the uniqueness key.
+- The local monotonic sequence counter is logged for callback ordering only, never as the uniqueness anchor.
+- On restart, already-finalized signalIds must not be duplicated.
+
+ENTRY TELEMETRY AT T0
+- last traded price
+- best bid, best ask, spread in ticks and dollars
+- top 5 bid and top 5 ask depth levels
+- session label
+- volatilityRegime: compute from causally available data only (information known at or before T0). If the offline audit's regime classification used whole-day or forward-looking information, do NOT reproduce it online — log volatilityRegime = CAUSAL_UNKNOWN and record the raw causal inputs (e.g. recent realized range/spread window) so the regime can be assigned offline later. Report which case applies.
+- executable entry side: long = Ask, short = Bid
+- entry quote diagnostics:
+  entryBidTimestamp, entryAskTimestamp
+  entryBidAgeMs, entryAskAgeMs, entryQuoteAgeMaxMs (relative to T0)
+  entryQuoteWasStale (diagnostic threshold 1000 ms)
+  entryQuoteValid (bid exists, ask exists, bid < ask, prices positive and finite)
+- If executable entry quote is missing or structurally invalid:
+  set shadowExecutableEntryAvailable = false
+  keep the research record
+  do NOT fabricate executable PnL
+
+TARGET MARKS
+Targets: T0 + 10s, 30s, 60s, 120s, 300s.
+
+For each pending target, keep the latest known Bid/Ask with market timestamps. When the first platform event with timestamp >= target is processed, finalize the live-timer mark using the last quote snapshot with timestamp <= target.
+
+Log per target:
+  targetTimestamp, finalizationTimestamp, finalizationLagMs
+  quoteTimestampUsed, quoteAgeAtTargetMs, carriedForward
+  liveBid, liveAsk, liveMid
+  executable exit side: closing long = Bid, closing short = Ask
+  quoteWasStale (1000 ms diagnostic)
+
+Never use a quote received after the target to represent the target. Never interpolate.
+
+Also log, for audit compatibility, the frozen research mark:
+  first native LAST at or after the target, its price, and its lag from the target.
+
+TWO ECONOMIC NAMESPACES — DO NOT MIX
+A. research.*  (audit-compatible, Last-based)
+   - research.entryLast, research.closeExcursion, research.netClose
+   - analyticalCostTotal = 0.50 (frozen; same as v1.1 audit)
+   - research.MFE / research.MAE from the Last path
+   - reuse the exact prior Forward Excursion RR function; if it cannot be recovered exactly, report BLOCKED_FORMULA_NOT_RECOVERABLE
+
+B. shadow.*  (executable, Bid/Ask-based)
+   - entry at executable side, exit at executable side — the observed spread is ALREADY paid here
+   - subtract only explicit non-spread costs: commission and extraSlippage
+   - shadow.grossExecutable, shadow.commission, shadow.extraSlippage, shadow.netExecutable
+   - do NOT subtract the frozen $0.50 proxy on top of executable Bid/Ask
+
+COST SENSITIVITY (two namespaces, never merged)
+researchCostSensitivity (Last-based): 0.30, 0.50, 0.70, 1.00
+executionSensitivity (Bid/Ask-based, commission / extra ticks):
+  $0.10 / 0, $0.30 / 0, $0.50 / 0, $0.50 / 2, $1.00 / 0
+
+FIRST-HIT FLAGS
+Last-based, descriptive only, prefixed researchFirstHitLast.*
+Targets +0.5/+1.0/+1.5/+2.0 before stops -0.5/-1.0/-1.5/-2.0, with first-hit timestamps.
+These are not executable fill evidence.
+
+PHASE A — ENGINEERING EQUIVALENCE (must pass before Phase B)
+- Run against previously analyzed Replay days where frozen offline Scenario E events already exist.
+- Compare: event count (using the audit tuple), direction, failureMs, oppositeRetestMs, T0, entryPrice, and cluster/candidate IDs where available.
+- DETECTOR_EQUIVALENCE = PASS requires exact event identity and exact platform timestamps wherever both offline and online representations expose the same native event.
+- Fallback ONLY when exact native identity cannot be represented through NinjaScript callbacks: absolute T0 difference <= 100 ms. This 100 ms is frozen now and must not be changed after seeing mismatches.
+- failureMs and oppositeRetestMs must match the frozen lifecycle semantics exactly; the 100 ms tolerance applies only to callback/event-boundary representation.
+- Phase A is for fixing implementation bugs only. No profitability conclusion. No threshold, filter, or lifecycle changes.
+- Phase A days must NOT be counted in the Phase B economic cohort.
+
+PHASE B — PROSPECTIVE SHADOW COLLECTION
+- Begin only after DETECTOR_EQUIVALENCE passes and code/spec hashes are frozen.
+- Freeze and record: prospective start timestamp, instrument, spec hash, detector hash.
+- Only events at or after the declared start timestamp count.
+- Collect 50–100 events.
+- No code changes during the cohort. If a change is required, close the cohort, increment the version, and start a new one. Never merge detector versions into one sample.
+
+OUTPUT — SHADOW_FLIP_TELEMETRY.jsonl
+Append one compact JSON object per completed signal. Do not rewrite the file. Flush after each finalized record.
+
+Each record includes:
+  signalId, shadowOnly, phase (A or B), cohortVersion
+  date, contract, instrumentFullName, specHash, detectorHash
+  T0, failureMs, oppositeRetestMs, direction, blockType, clusterId, candidateId
+  entry block (last, bid, ask, spread, top5 depth, quote diagnostics, shadowExecutableEntryAvailable)
+  session, volatilityRegime (or CAUSAL_UNKNOWN + raw inputs)
+  per-horizon research.* and shadow.* metrics, live-timer details, frozen research mark
+  researchFirstHitLast.* flags
+  staleness flags and quote ages
+  researchCostSensitivity and executionSensitivity
+
+OUTPUT — SHADOW_FLIP_SESSION_STATUS.json
+  start timestamp, instrument, spec version/hash, detector version/hash,
+  phase, cohortVersion, last finalized signalId, counts,
+  abnormal-termination/restart marker, shadowOnly = true,
+  depth availability state (OK or DEPTH_UNAVAILABLE)
+
+Restart safety: reload the last finalized signalId set so restarts do not duplicate records.
+
+FINAL REPORTING (after Phase B completes)
+Report, without recommending TP/SL or live trading:
+- detector equivalence result
+- research-compatible metrics
+- executable-side shadow metrics
+- spread distribution
+- quote-age and target-finalization-lag distributions
+- stale/invalid data counts
+- per-day / direction / session / volatility summaries
+- software and spec hashes
+
+Devin + GPT review before any execution discussion.
+
+START STATEMENT
+Reply only "READY" when the constraints are understood, or raise a single blocking ambiguity if the frozen detector cannot be ported without an unresolved semantic choice.

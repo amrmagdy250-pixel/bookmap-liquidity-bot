@@ -1,0 +1,54 @@
+Market-Mechanics Forward Excursion Audit for GC Replay
+
+You are a market-data analyst working on NinjaTrader Replay (.nrd) files for GC Gold Futures contracts (GC 08-26 / GC 12-26). You have access to more than 20 days of replay data, some of which were used in prior research phases (Market Mechanics V2 and Order Block V3).
+
+Your task is to compute a real forward excursion profile (MFE / MAE / risk-reward) for several mechanically-defined scenarios. Do not optimize, tune, or fit anything to outcome labels after looking at them. Use only definitions already frozen in the existing V2/V3 reports. The goal is not to improve results but to measure whether the robust mechanical behaviors are strong enough to justify building a trading bot.
+
+Requirements
+1. Use the frozen definitions from V2/V3: mechanical levels, accepted/failed breaks, first retest, refill latency, Order Block (Classical Final Opposite and Depletion), progressive consumption, flip after confirmed failure.
+2. Do not change any threshold, window, or formula once the run starts. Any new parameter needed for MFE/MAE measurement must be declared up front and applied identically across all admitted days.
+3. No PnL, win-rate optimization, or outcome-label leakage. No future information may be used at event time.
+
+Scenarios to measure
+Compute forward excursion starting at the causal entry tick for:
+A. First touch of a defended Classical Final Opposite Order Block.
+B. First touch of a Depletion-type Order Block.
+C. First retest after an accepted break (15s, 30s, 60s measured once at event time).
+D. Fast-refill retest (refill latency <= the frozen 30-second median where the refill × retest penetration interaction applies).
+E. Flip after confirmed failure (opposite-side retest of a failed block).
+F. Mechanical level accepted-break continuation (V2 accepted break).
+G. Baseline control: all first-touch events pooled, to compare against naive/random direction.
+
+Statistics to compute for every scenario
+For each scenario, report on the full sample and per split:
+- Time windows after event: 10s, 30s, 60s, 2min, 5min.
+- MFE in dollars: median, p25, p75, p10, p90.
+- MAE in dollars: median, p25, p75, p10, p90.
+- Directional excursion share: share of cases where favorable excursion exceeded adverse excursion.
+- Reach frequency before stop: percent reaching +$1, +$2, +$4, +$6, +$10 before reaching -$2, -$4, -$6, -$10. Entry cost includes spread (~$0.40 for GC, ~4 ticks) plus $0.10 slippage.
+- Profit-close share: percent closing beyond entry + half-spread at each window.
+- Cost-adjusted RR: (median MFE - cost) / (median MAE + cost), with cost = $0.50.
+
+Mandatory splits
+- Development (approx. 2026-06-01 to 2026-06-17).
+- External Validation (approx. 2026-06-18, 22, 23).
+- Historical Holdout (approx. 2026-06-25, 26, 29, 30).
+- Prospective (new unseen days such as 2026-07-02, 06, 08, 13, 14 if available and not used before).
+- Bullish vs Bearish direction.
+- Sessions: Asia, Europe, US, Late.
+- Volatility regimes: Low, Normal, High.
+
+Data handling
+- Exclude days marked MISSING_L2 or PARTIAL_SESSION.
+- Do not substitute any date.
+- Every result must include sample size n and Insufficient-Data share.
+- If a new threshold is needed for measuring MFE/MAE in a window, declare it and apply it uniformly.
+
+Output format
+Write one comprehensive English report with clear comparison tables per scenario. At the end include:
+1. Numeric summary: which scenario achieves cost-adjusted RR >= 1.0 consistently across splits.
+2. Which scenario reaches +$2 before -$4 in >= 55% of cases.
+3. Which scenario reaches +$4 before -$4 in >= 50% of cases.
+4. Final recommendation: whether the data justifies building a standalone automated bot.
+
+Reply with "Acknowledged" before starting if the task is clear, otherwise ask for clarification.

@@ -1,0 +1,42 @@
+plugins {
+    id 'java'
+}
+
+// Target Java 11 bytecode for maximum compatibility: it loads on Bookmap
+// installs running either a Java 11 or a Java 17 JRE. (A Java 17 class fails to
+// load on a Java 11 JRE, which makes Bookmap report "no entry points found".)
+sourceCompatibility = JavaVersion.VERSION_11
+targetCompatibility = JavaVersion.VERSION_11
+tasks.withType(JavaCompile).configureEach {
+    options.release = 11
+}
+
+repositories {
+    mavenCentral()
+    maven {
+        url "https://maven.bookmap.com/maven2/releases/"
+    }
+}
+
+ext {
+    // Bookmap public API version. compileOnly: the classes are provided by
+    // Bookmap itself at runtime, so they must NOT be bundled into the jar.
+    bookmapApiVersion = '7.6.0.20'
+}
+
+dependencies {
+    compileOnly group: 'com.bookmap.api', name: 'api-core', version: bookmapApiVersion
+    compileOnly group: 'com.bookmap.api', name: 'api-simplified', version: bookmapApiVersion
+
+    // Provided by Bookmap at runtime as well.
+    compileOnly group: 'org.apache.commons', name: 'commons-lang3', version: '3.11'
+    compileOnly group: 'com.ibm.icu', name: 'icu4j', version: '71.1'
+}
+
+jar {
+    // This is the file you load into Bookmap (Settings -> Configure API plugins -> Add).
+    // Bookmap's whitelisting for real-time data requires a unique file name:
+    // <username>_<addon>_<version>.jar
+    archiveBaseName = 'oaccygggosymbuje_liquiditywallbot'
+    archiveVersion = project.hasProperty('botVersion') ? project.botVersion : 'dev'
+}
